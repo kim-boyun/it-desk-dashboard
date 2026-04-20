@@ -54,6 +54,7 @@ DEFAULT_DB_URL = (
 )
 DEFAULT_REFRESH_SEC = 30
 DEFAULT_RECENT_LIMIT = 18
+BOTTOM_PANEL_MAX_ROWS = 8
 NEW_ALERT_DURATION_SEC = 4.0
 NEW_ALERT_BLINK_SEC = 0.45
 LIVE_SPINNER_FRAMES = ("|", "/", "-", "\\")
@@ -1297,6 +1298,7 @@ def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme) -> Pane
 # --- 오늘 카테고리 ---
 
 def render_category_today(rows: list[CategoryToday], theme: Theme) -> Panel:
+    rows = rows[:BOTTOM_PANEL_MAX_ROWS]
     table = Table(
         box=box.SIMPLE, expand=False, show_edge=False, pad_edge=False,
         header_style=f"bold {theme.accent}",
@@ -1325,6 +1327,7 @@ def render_category_today(rows: list[CategoryToday], theme: Theme) -> Panel:
 
 
 def render_work_type_today(rows: list[WorkTypeToday], theme: Theme) -> Panel:
+    rows = rows[:BOTTOM_PANEL_MAX_ROWS]
     table = Table(
         box=box.SIMPLE, expand=False, show_edge=False, pad_edge=False,
         header_style=f"bold {theme.accent}",
@@ -1353,6 +1356,7 @@ def render_work_type_today(rows: list[WorkTypeToday], theme: Theme) -> Panel:
 
 
 def render_department_today(rows: list[DepartmentToday], theme: Theme) -> Panel:
+    rows = rows[:BOTTOM_PANEL_MAX_ROWS]
     table = Table(
         box=box.SIMPLE, expand=False, show_edge=False, pad_edge=False,
         header_style=f"bold {theme.accent}",
@@ -1541,12 +1545,12 @@ def build_layout(
     category_rows = len(data.by_category_today)
     work_type_rows = len(data.by_work_type_today)
     department_rows = len(data.by_department_today)
-    # 요청 현황 패널은 운영 가독성을 위해 고정 높이로 유지
+    # 요청 현황 패널 고정 높이(요청값 복원)
     recent_size = 22 if compact else 24
     workload_size = max(6, workload_rows + 4)
-    category_size = max(6, category_rows + 4)
-    work_type_size = max(6, work_type_rows + 4)
-    department_size = max(6, department_rows + 4)
+    category_size = max(6, min(BOTTOM_PANEL_MAX_ROWS, category_rows) + 4)
+    work_type_size = max(6, min(BOTTOM_PANEL_MAX_ROWS, work_type_rows) + 4)
+    department_size = max(6, min(BOTTOM_PANEL_MAX_ROWS, department_rows) + 4)
     left_bottom_size = max(category_size, work_type_size, department_size)
 
     # 본문 좌/우 폭. 우측 컬럼(상태/추세/워크로드)은 동일 너비로 유지
@@ -1566,23 +1570,16 @@ def build_layout(
     )
     root["left_gap"].update(Text(""))
     root["left_spacer"].update(Text(""))
-    work_type_panel_width = 44 if compact else 50
-    category_panel_width = 48 if compact else 58
-    department_panel_width = 46 if compact else 54
-    bottom_gap = 0 if compact else 1
+    bottom_gap = 1 if compact else 2
     root["left_bottom"].split_row(
-        Layout(name="left_bottom_pad_l", ratio=1),
-        Layout(name="work_type", size=work_type_panel_width),
+        Layout(name="work_type", ratio=1),
         Layout(name="left_bottom_gap", size=bottom_gap),
-        Layout(name="category", size=category_panel_width),
+        Layout(name="category", ratio=1),
         Layout(name="left_bottom_gap_2", size=bottom_gap),
-        Layout(name="department", size=department_panel_width),
-        Layout(name="left_bottom_pad_r", ratio=1),
+        Layout(name="department", ratio=1),
     )
-    root["left_bottom_pad_l"].update(Text(""))
     root["left_bottom_gap"].update(Text(""))
     root["left_bottom_gap_2"].update(Text(""))
-    root["left_bottom_pad_r"].update(Text(""))
 
     # 우측: 상태 분포 / 최근 7일 추세 / 담당자 워크로드
     # 세 패널 모두 right_main 안에 있어 동일 너비를 갖는다.
