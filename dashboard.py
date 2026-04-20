@@ -53,7 +53,7 @@ DEFAULT_DB_URL = (
     "kdis_ticket?options=-csearch_path%3Dticket"
 )
 DEFAULT_REFRESH_SEC = 30
-DEFAULT_RECENT_LIMIT = 18
+DEFAULT_RECENT_LIMIT = 8
 BOTTOM_PANEL_MAX_ROWS = 8
 NEW_ALERT_DURATION_SEC = 4.0
 NEW_ALERT_BLINK_SEC = 0.45
@@ -818,7 +818,7 @@ class DashboardRepository:
                 """
                 WITH day_series AS (
                     SELECT generate_series(
-                        date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '6 days',
+                        date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '4 days',
                         date_trunc('day', now() AT TIME ZONE 'Asia/Seoul'),
                         interval '1 day'
                     )::date AS day_kst
@@ -829,7 +829,7 @@ class DashboardRepository:
                         count(*)::int AS count
                     FROM tickets
                     WHERE (created_at AT TIME ZONE 'Asia/Seoul')
-                          >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '6 days'
+                          >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '4 days'
                     GROUP BY 1
                 )
                 SELECT to_char(s.day_kst, 'MM/DD') AS label,
@@ -1009,9 +1009,6 @@ def render_header(
     live_state: str = "ok",  # ok / warn / danger
     last_ok_text: str | None = None,
 ) -> RenderableType:
-    banner = Text("\n".join(BANNER_LINES), style=f"bold {theme.accent}")
-    subtitle = Text("Operations Dashboard · 실시간 운영 상황판", style=theme.info)
-
     live_color = (
         theme.ok if live_state == "ok"
         else theme.warn if live_state == "warn"
@@ -1022,20 +1019,15 @@ def render_header(
     last_ok = last_ok_text or "--:--:--"
 
     left = Text(f"[LIVE {spinner_text}]", style=f"bold {live_color}")
+    center = Text(f"실시간 운영 상황판  ·  schema={schema_label or 'default'}", style=theme.info)
     right = Text(f"[RT {dot_text} {last_ok}]", style=f"bold {live_color}")
 
     indicator_row = Table.grid(expand=True)
     indicator_row.add_column(justify="left", ratio=1)
     indicator_row.add_column(justify="center", ratio=2)
     indicator_row.add_column(justify="right", ratio=1)
-    indicator_row.add_row(left, Text(""), right)
-
-    header_group = Group(
-        indicator_row,
-        Align.center(banner),
-        Align.center(subtitle),
-    )
-    return Padding(header_group, (1, 0, 0, 0))
+    indicator_row.add_row(left, center, right)
+    return indicator_row
 
 
 # --- KPI 카드 ---
@@ -1049,7 +1041,7 @@ def _kpi_card(label: str, value: str, sub: RenderableType, accent: str, theme: T
     body = Group(label_t, value_t, Align.center(sub_renderable))
     return Panel(
         Padding(body, (0, 1)),
-        box=box.HEAVY,
+        box=box.SQUARE,
         border_style=accent,
         padding=(0, 0),
     )
@@ -1117,7 +1109,7 @@ def render_kpi_strip(
     for _ in range(4):
         grid.add_column(ratio=1)
     grid.add_row(card_new, card_done, card_rate, card_pending)
-    return Padding(grid, (0, 2))  # 좌우 약간의 여백
+    return Padding(grid, (0, 1))  # 좌우 여백 최소화
 
 
 # --- 알림 영역 ---
@@ -1172,7 +1164,7 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
         show_edge=False, pad_edge=False, show_lines=False,
         header_style=f"bold {theme.accent}",
     )
-    table.add_column("우선", justify="center", width=4)
+    table.add_column("ID", justify="right", width=6, style=theme.muted)
     table.add_column("요청제목", overflow="fold", ratio=4)
     if view.recent_show_category:
         table.add_column("카테고리", overflow="ellipsis", no_wrap=True, min_width=12, ratio=2, style=theme.muted)
@@ -1185,7 +1177,8 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
     table.add_column("경과", justify="right", width=6)
 
     if not rows:
-        empty = ["-", "데이터 없음"]
+        empty = ["-"]
+        empty.append("데이터 없음")
         if view.recent_show_category:
             empty.append("-")
         if view.recent_show_requester:
@@ -1202,8 +1195,6 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
         for r in rows:
             is_completed = r.status in ("resolved", "closed")
             status_color = theme.status_color(r.status)
-            prio_style = PRIORITY_STYLE.get(r.priority, "white")
-            prio_label = PRIORITY_LABEL.get(r.priority, r.priority)
 
             title_text = Text(truncate(r.title, RECENT_TITLE_MAX))
             if r.is_unassigned and r.status in ("open", "in_progress"):
@@ -1224,10 +1215,7 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
                 elif r.age_hours >= 24:
                     age_color = theme.warn
 
-            cells = [
-                Text(prio_label, style=prio_style),
-                title_text,
-            ]
+            cells = [Text(f"#{r.id}", style=theme.muted), title_text]
             if view.recent_show_category:
                 cells.append(Text(truncate(r.category, RECENT_CATEGORY_MAX), style=theme.muted))
             if view.recent_show_requester:
@@ -1486,7 +1474,7 @@ def render_trend(rows: list[TrendPoint], theme: Theme) -> Panel:
 
     today_color = theme.warn if delta > 0 else (theme.ok if delta < 0 else theme.muted)
     summary = Text()
-    summary.append("7일 합계 ", style=theme.muted)
+    summary.append("5일 합계 ", style=theme.muted)
     summary.append(f"{total}건", style=f"bold {theme.accent}")
     summary.append("   평균 ", style=theme.muted)
     summary.append(f"{avg:.1f}건", style=theme.info)
@@ -1524,7 +1512,7 @@ def render_trend(rows: list[TrendPoint], theme: Theme) -> Panel:
     )
     return Panel(
         body, box=box.SQUARE, border_style=theme.muted,
-        title=f"[bold {theme.accent}]최근 7일 신규 추세[/]", title_align="left",
+        title=f"[bold {theme.accent}]최근 5일 신규 추세[/]", title_align="left",
     )
 
 
@@ -1598,10 +1586,10 @@ def build_layout(
     last_ok_text: str | None = None,
 ) -> Layout:
     root = Layout(name="root")
-    header_size = 8                                            # 배너 5 + 부제 2 + 패딩 1
+    header_size = 2
     kpi_size = 5
-    alert_size = min(10, 3 + max(0, len(data.insights.alerts)))
-    footer_size = 3
+    alert_size = max(3, min(8, 2 + max(0, len(data.insights.alerts))))
+    footer_size = 0
     outer_margin = 2 if compact else 3
     gap = 1
 
@@ -1623,21 +1611,18 @@ def build_layout(
         Layout(name="alert", size=alert_size),
         Layout(name="v_gap_3", size=gap),
         Layout(name="body", ratio=1),
-        Layout(name="v_gap_4", size=gap),
-        Layout(name="footer", size=footer_size),
     )
     root["v_gap_1"].update(Text(""))
     root["v_gap_2"].update(Text(""))
     root["v_gap_3"].update(Text(""))
-    root["v_gap_4"].update(Text(""))
 
     # 본문: 좌측(최근요청 + 작업유형/카테고리/부서), 우측(상태/추세/워크로드) 구조
     workload_rows = len(data.by_assignee_workload)
     category_rows = len(data.by_category_today)
     work_type_rows = len(data.by_work_type_today)
     department_rows = len(data.by_department_today)
-    # 요청 현황 패널 고정 높이(요청값 복원)
-    recent_size = 22 if compact else 24
+    # 요청 현황 패널 높이 축소(하단 3패널을 위로 당김)
+    recent_size = 12 if compact else 13
     workload_size = max(6, workload_rows + 4)
     category_size = max(6, min(view.bottom_max_rows, category_rows) + 4)
     work_type_size = max(6, min(view.bottom_max_rows, work_type_rows) + 4)
@@ -1653,9 +1638,10 @@ def build_layout(
     root["h_gap"].update(Text(""))
 
     # 좌측: 최근 요청 + 하단(작업유형/카테고리)
+    left_gap_size = 0 if compact else 0
     root["left_main"].split_column(
         Layout(name="recent", size=recent_size),
-        Layout(name="left_gap", size=gap),
+        Layout(name="left_gap", size=left_gap_size),
         Layout(name="left_bottom", size=left_bottom_size),
         Layout(name="left_spacer", ratio=1),
     )
@@ -1711,9 +1697,6 @@ def build_layout(
     root["category"].update(render_category_today(data.by_category_today, theme, view))
     root["work_type"].update(render_work_type_today(data.by_work_type_today, theme, view))
     root["department"].update(render_department_today(data.by_department_today, theme, view))
-    mode = "컴팩트" if compact else "표준"
-    root["footer"].update(render_footer(theme, data.refreshed_at, refresh_sec,
-                                        schema_label, paused, mode, last_error))
     return root
 
 
