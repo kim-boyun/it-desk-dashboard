@@ -49,7 +49,7 @@ from rich.text import Text
 # ============================================================================
 
 DEFAULT_DB_URL = (
-    "postgresql+psycopg://kdis_ticket:kdis3299%21@pg-1bt2s.vpc-cdb-kr.gov-ntruss.com:5432/"
+    "postgresql+psycopg://kdis_ticket:kdis3299%21@10.1.10.6:5432/"
     "kdis_ticket?options=-csearch_path%3Dticket"
 )
 DEFAULT_REFRESH_SEC = 30
