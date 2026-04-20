@@ -271,6 +271,42 @@ class DashboardData:
     refreshed_at: datetime
 
 
+@dataclass
+class ViewOptions:
+    bottom_max_rows: int
+    recent_show_category: bool
+    recent_show_requester: bool
+    recent_show_created: bool
+    bottom_show_week: bool
+    bottom_show_total: bool
+    workload_show_week: bool
+    workload_show_total: bool
+
+
+def derive_view_options(term_width: int, term_height: int, force_compact: bool) -> ViewOptions:
+    """터미널 문자 셀 크기에 따라 컬럼/행 가시 정책을 결정."""
+    compact = force_compact or term_width < 160 or term_height < 46
+    very_compact = term_width < 140 or term_height < 40
+
+    if term_height >= 56:
+        bottom_rows = 8
+    elif term_height >= 48:
+        bottom_rows = 6
+    else:
+        bottom_rows = 5
+
+    return ViewOptions(
+        bottom_max_rows=bottom_rows,
+        recent_show_category=(not very_compact),
+        recent_show_requester=(not very_compact),
+        recent_show_created=(not compact),
+        bottom_show_week=(not very_compact),
+        bottom_show_total=(term_width >= 175 and not compact),
+        workload_show_week=(not very_compact),
+        workload_show_total=(term_width >= 170 and not compact),
+    )
+
+
 # ============================================================================
 # 3) URL 유틸
 # ============================================================================
@@ -1130,7 +1166,7 @@ def render_alerts(
 
 # --- 최근 요청 ---
 
-def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: bool) -> Panel:
+def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: bool, view: ViewOptions) -> Panel:
     table = Table(
         box=box.SIMPLE_HEAVY, expand=True,
         show_edge=False, pad_edge=False, show_lines=False,
@@ -1138,18 +1174,29 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
     )
     table.add_column("우선", justify="center", width=4)
     table.add_column("요청제목", overflow="fold", ratio=4)
-    if not compact:
+    if view.recent_show_category:
         table.add_column("카테고리", overflow="ellipsis", no_wrap=True, min_width=12, ratio=2, style=theme.muted)
-    table.add_column("요청자", overflow="fold", ratio=1)
+    if view.recent_show_requester:
+        table.add_column("요청자", overflow="fold", ratio=1)
     table.add_column("담당자", overflow="fold", ratio=2)
     table.add_column("상태", justify="center", width=8)
-    table.add_column("등록", justify="center", width=11, style=theme.muted)
+    if view.recent_show_created:
+        table.add_column("등록", justify="center", width=11, style=theme.muted)
     table.add_column("경과", justify="right", width=6)
 
     if not rows:
-        empty = ["-", "데이터 없음", "-", "-", "-", "-", "-"]
-        if compact:
-            empty.pop(2)
+        empty = ["-", "데이터 없음"]
+        if view.recent_show_category:
+            empty.append("-")
+        if view.recent_show_requester:
+            empty.append("-")
+        # 담당자, 상태
+        empty.extend(["-", "-"])
+        # 등록(옵션)
+        if view.recent_show_created:
+            empty.append("-")
+        # 경과
+        empty.append("-")
         table.add_row(*empty)
     else:
         for r in rows:
@@ -1180,15 +1227,18 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
             cells = [
                 Text(prio_label, style=prio_style),
                 title_text,
-                Text(truncate(r.category, RECENT_CATEGORY_MAX), style=theme.muted),
-                Text(r.requester),
+            ]
+            if view.recent_show_category:
+                cells.append(Text(truncate(r.category, RECENT_CATEGORY_MAX), style=theme.muted))
+            if view.recent_show_requester:
+                cells.append(Text(r.requester))
+            cells.extend([
                 assignee_text,
                 Text(STATUS_LABEL.get(r.status, r.status), style=status_color),
-                Text(r.created_at_kst, style=theme.muted),
-                Text(humanize_age(r.age_hours), style=age_color),
-            ]
-            if compact:
-                cells.pop(2)
+            ])
+            if view.recent_show_created:
+                cells.append(Text(r.created_at_kst, style=theme.muted))
+            cells.append(Text(humanize_age(r.age_hours), style=age_color))
 
             # 완료/사업검토 건은 dim 처리 → 미처리 행이 시각적으로 도드라짐
             if is_completed:
@@ -1240,7 +1290,7 @@ def render_status_distribution(rows: list[StatusCount], theme: Theme) -> Panel:
 
 # --- 담당자 워크로드 ---
 
-def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme) -> Panel:
+def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme, view: ViewOptions) -> Panel:
     table = Table(
         box=box.SIMPLE, expand=True, show_edge=False, pad_edge=False,
         header_style=f"bold {theme.accent}",
@@ -1249,11 +1299,18 @@ def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme) -> Pane
     table.add_column("담당자", overflow="fold", ratio=1)
     table.add_column("미처리", justify="right", width=6)
     table.add_column("오늘", justify="right", width=6)
-    table.add_column("이번주", justify="right", width=7)
-    table.add_column("총", justify="right", width=6)
+    if view.workload_show_week:
+        table.add_column("이번주", justify="right", width=7)
+    if view.workload_show_total:
+        table.add_column("총", justify="right", width=6)
 
     if not rows:
-        table.add_row("-", "데이터 없음", "0", "0", "0", "0")
+        empty = ["-", "데이터 없음", "0", "0"]
+        if view.workload_show_week:
+            empty.append("0")
+        if view.workload_show_total:
+            empty.append("0")
+        table.add_row(*empty)
         return Panel(
             table, box=box.SQUARE, border_style=theme.muted,
             title=f"[bold {theme.accent}]담당자 워크로드[/]", title_align="left",
@@ -1280,14 +1337,17 @@ def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme) -> Pane
                 pending_color = theme.muted
 
         done_color = theme.ok if w.done_today_count > 0 else theme.muted
-        table.add_row(
+        cells = [
             rank_label,
             assignee_text,
             Text(str(w.pending_count), style=f"bold {pending_color}"),
             Text(str(w.done_today_count), style=done_color),
-            Text(str(w.done_week_count), style=theme.info if w.done_week_count > 0 else theme.muted),
-            Text(str(w.done_total_count), style=theme.info if w.done_total_count > 0 else theme.muted),
-        )
+        ]
+        if view.workload_show_week:
+            cells.append(Text(str(w.done_week_count), style=theme.info if w.done_week_count > 0 else theme.muted))
+        if view.workload_show_total:
+            cells.append(Text(str(w.done_total_count), style=theme.info if w.done_total_count > 0 else theme.muted))
+        table.add_row(*cells)
 
     return Panel(
         table, box=box.SQUARE, border_style=theme.muted,
@@ -1297,28 +1357,38 @@ def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme) -> Pane
 
 # --- 오늘 카테고리 ---
 
-def render_category_today(rows: list[CategoryToday], theme: Theme) -> Panel:
-    rows = rows[:BOTTOM_PANEL_MAX_ROWS]
+def render_category_today(rows: list[CategoryToday], theme: Theme, view: ViewOptions) -> Panel:
+    rows = rows[:view.bottom_max_rows]
     table = Table(
         box=box.SIMPLE, expand=False, show_edge=False, pad_edge=False,
         header_style=f"bold {theme.accent}",
     )
     table.add_column("카테고리", no_wrap=True, overflow="ellipsis", width=24)
     table.add_column("오늘", justify="right", width=6)
-    table.add_column("이번주", justify="right", width=7)
-    table.add_column("총", justify="right", width=6)
+    if view.bottom_show_week:
+        table.add_column("이번주", justify="right", width=7)
+    if view.bottom_show_total:
+        table.add_column("총", justify="right", width=6)
 
     if not rows:
-        table.add_row("데이터 없음", "0", "0", "0")
+        empty = ["데이터 없음", "0"]
+        if view.bottom_show_week:
+            empty.append("0")
+        if view.bottom_show_total:
+            empty.append("0")
+        table.add_row(*empty)
     else:
         for r in rows:
             color = theme.info if (r.today_count > 0 or r.week_count > 0 or r.total_count > 0) else theme.muted
-            table.add_row(
+            cells: list[RenderableType] = [
                 Text(r.category, style=color),
                 Text(str(r.today_count), style=f"bold {color}" if r.today_count > 0 else theme.muted),
-                Text(str(r.week_count), style=theme.info if r.week_count > 0 else theme.muted),
-                Text(str(r.total_count), style=theme.info if r.total_count > 0 else theme.muted),
-            )
+            ]
+            if view.bottom_show_week:
+                cells.append(Text(str(r.week_count), style=theme.info if r.week_count > 0 else theme.muted))
+            if view.bottom_show_total:
+                cells.append(Text(str(r.total_count), style=theme.info if r.total_count > 0 else theme.muted))
+            table.add_row(*cells)
 
     return Panel(
         Align.left(table), box=box.SQUARE, border_style=theme.muted,
@@ -1326,28 +1396,38 @@ def render_category_today(rows: list[CategoryToday], theme: Theme) -> Panel:
     )
 
 
-def render_work_type_today(rows: list[WorkTypeToday], theme: Theme) -> Panel:
-    rows = rows[:BOTTOM_PANEL_MAX_ROWS]
+def render_work_type_today(rows: list[WorkTypeToday], theme: Theme, view: ViewOptions) -> Panel:
+    rows = rows[:view.bottom_max_rows]
     table = Table(
         box=box.SIMPLE, expand=False, show_edge=False, pad_edge=False,
         header_style=f"bold {theme.accent}",
     )
     table.add_column("작업 유형", no_wrap=True, overflow="ellipsis", width=14)
     table.add_column("오늘", justify="right", width=6)
-    table.add_column("이번주", justify="right", width=7)
-    table.add_column("총", justify="right", width=6)
+    if view.bottom_show_week:
+        table.add_column("이번주", justify="right", width=7)
+    if view.bottom_show_total:
+        table.add_column("총", justify="right", width=6)
 
     if not rows:
-        table.add_row("데이터 없음", "0", "0", "0")
+        empty = ["데이터 없음", "0"]
+        if view.bottom_show_week:
+            empty.append("0")
+        if view.bottom_show_total:
+            empty.append("0")
+        table.add_row(*empty)
     else:
         for r in rows:
             color = theme.info if (r.today_count > 0 or r.week_count > 0 or r.total_count > 0) else theme.muted
-            table.add_row(
+            cells: list[RenderableType] = [
                 Text(r.work_type, style=color),
                 Text(str(r.today_count), style=f"bold {color}" if r.today_count > 0 else theme.muted),
-                Text(str(r.week_count), style=theme.info if r.week_count > 0 else theme.muted),
-                Text(str(r.total_count), style=theme.info if r.total_count > 0 else theme.muted),
-            )
+            ]
+            if view.bottom_show_week:
+                cells.append(Text(str(r.week_count), style=theme.info if r.week_count > 0 else theme.muted))
+            if view.bottom_show_total:
+                cells.append(Text(str(r.total_count), style=theme.info if r.total_count > 0 else theme.muted))
+            table.add_row(*cells)
 
     return Panel(
         Align.left(table), box=box.SQUARE, border_style=theme.muted,
@@ -1355,28 +1435,38 @@ def render_work_type_today(rows: list[WorkTypeToday], theme: Theme) -> Panel:
     )
 
 
-def render_department_today(rows: list[DepartmentToday], theme: Theme) -> Panel:
-    rows = rows[:BOTTOM_PANEL_MAX_ROWS]
+def render_department_today(rows: list[DepartmentToday], theme: Theme, view: ViewOptions) -> Panel:
+    rows = rows[:view.bottom_max_rows]
     table = Table(
         box=box.SIMPLE, expand=False, show_edge=False, pad_edge=False,
         header_style=f"bold {theme.accent}",
     )
     table.add_column("부서", no_wrap=True, overflow="ellipsis", width=22)
     table.add_column("오늘", justify="right", width=6)
-    table.add_column("이번주", justify="right", width=7)
-    table.add_column("총", justify="right", width=6)
+    if view.bottom_show_week:
+        table.add_column("이번주", justify="right", width=7)
+    if view.bottom_show_total:
+        table.add_column("총", justify="right", width=6)
 
     if not rows:
-        table.add_row("데이터 없음", "0", "0", "0")
+        empty = ["데이터 없음", "0"]
+        if view.bottom_show_week:
+            empty.append("0")
+        if view.bottom_show_total:
+            empty.append("0")
+        table.add_row(*empty)
     else:
         for r in rows:
             color = theme.info if (r.today_count > 0 or r.week_count > 0 or r.total_count > 0) else theme.muted
-            table.add_row(
+            cells: list[RenderableType] = [
                 Text(r.department, style=color),
                 Text(str(r.today_count), style=f"bold {color}" if r.today_count > 0 else theme.muted),
-                Text(str(r.week_count), style=theme.info if r.week_count > 0 else theme.muted),
-                Text(str(r.total_count), style=theme.info if r.total_count > 0 else theme.muted),
-            )
+            ]
+            if view.bottom_show_week:
+                cells.append(Text(str(r.week_count), style=theme.info if r.week_count > 0 else theme.muted))
+            if view.bottom_show_total:
+                cells.append(Text(str(r.total_count), style=theme.info if r.total_count > 0 else theme.muted))
+            table.add_row(*cells)
 
     return Panel(
         Align.left(table), box=box.SQUARE, border_style=theme.muted,
@@ -1494,6 +1584,7 @@ def build_layout(
     data: DashboardData,
     theme: Theme,
     schema_label: str | None,
+    view: ViewOptions,
     refresh_sec: int,
     compact: bool,
     paused: bool,
@@ -1548,9 +1639,9 @@ def build_layout(
     # 요청 현황 패널 고정 높이(요청값 복원)
     recent_size = 22 if compact else 24
     workload_size = max(6, workload_rows + 4)
-    category_size = max(6, min(BOTTOM_PANEL_MAX_ROWS, category_rows) + 4)
-    work_type_size = max(6, min(BOTTOM_PANEL_MAX_ROWS, work_type_rows) + 4)
-    department_size = max(6, min(BOTTOM_PANEL_MAX_ROWS, department_rows) + 4)
+    category_size = max(6, min(view.bottom_max_rows, category_rows) + 4)
+    work_type_size = max(6, min(view.bottom_max_rows, work_type_rows) + 4)
+    department_size = max(6, min(view.bottom_max_rows, department_rows) + 4)
     left_bottom_size = max(category_size, work_type_size, department_size)
 
     # 본문 좌/우 폭. 우측 컬럼(상태/추세/워크로드)은 동일 너비로 유지
@@ -1613,13 +1704,13 @@ def build_layout(
         when = f" ({new_alert_time})" if new_alert_time else ""
         new_event_message = f"신규 요청 +{new_alert_delta}건 유입{when}"
     root["alert"].update(render_alerts(data.insights, theme, new_event_message=new_event_message))
-    root["recent"].update(render_recent_requests(data.recent_requests, theme, compact))
-    root["workload"].update(Padding(render_assignee_workload(data.by_assignee_workload, theme), (0, 1)))
+    root["recent"].update(render_recent_requests(data.recent_requests, theme, compact, view))
+    root["workload"].update(Padding(render_assignee_workload(data.by_assignee_workload, theme, view), (0, 1)))
     root["status"].update(Padding(render_status_distribution(data.by_status, theme), (0, 1)))
     root["trend"].update(Padding(render_trend(data.trend_7d, theme), (0, 1)))
-    root["category"].update(render_category_today(data.by_category_today, theme))
-    root["work_type"].update(render_work_type_today(data.by_work_type_today, theme))
-    root["department"].update(render_department_today(data.by_department_today, theme))
+    root["category"].update(render_category_today(data.by_category_today, theme, view))
+    root["work_type"].update(render_work_type_today(data.by_work_type_today, theme, view))
+    root["department"].update(render_department_today(data.by_department_today, theme, view))
     mode = "컴팩트" if compact else "표준"
     root["footer"].update(render_footer(theme, data.refreshed_at, refresh_sec,
                                         schema_label, paused, mode, last_error))
@@ -1824,8 +1915,11 @@ def run_loop(args: argparse.Namespace) -> int:
     if args.once:
         _do_fetch(time.monotonic())
         if last_data is not None:
+            once_size = console.size
+            once_view = derive_view_options(once_size.width, once_size.height, state.compact)
             console.print(build_layout(
                 last_data, state.theme(), schema_label,
+                once_view,
                 state.refresh_sec, state.compact, state.paused, last_error,
                 new_alert_delta=0,
                 pulse_on=False,
@@ -1871,6 +1965,8 @@ def run_loop(args: argparse.Namespace) -> int:
 
                 # 화면 업데이트
                 if last_data is not None:
+                    term_size = console.size
+                    view = derive_view_options(term_size.width, term_size.height, state.compact)
                     spinner_idx = int(now / LIVE_SPINNER_STEP_SEC) % len(LIVE_SPINNER_FRAMES)
                     live_spinner = LIVE_SPINNER_FRAMES[spinner_idx]
                     live_dot_on = (int(now / LIVE_BLINK_SEC) % 2 == 0)
@@ -1887,6 +1983,7 @@ def run_loop(args: argparse.Namespace) -> int:
                     visible_new_delta = new_alert_delta if pulse_active else 0
                     live.update(build_layout(
                         last_data, state.theme(), schema_label,
+                        view,
                         state.refresh_sec, state.compact, state.paused, last_error,
                         new_alert_delta=visible_new_delta,
                         pulse_on=pulse_on,
