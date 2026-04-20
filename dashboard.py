@@ -974,7 +974,6 @@ def render_header(
 ) -> RenderableType:
     banner = Text("\n".join(BANNER_LINES), style=f"bold {theme.accent}")
     subtitle = Text("Operations Dashboard · 실시간 운영 상황판", style=theme.info)
-    sub2 = Text(f"schema={schema_label or 'default'}  ·  KST 기준 집계", style=theme.muted)
 
     live_color = (
         theme.ok if live_state == "ok"
@@ -988,13 +987,18 @@ def render_header(
     left = Text(f"[LIVE {spinner_text}]", style=f"bold {live_color}")
     right = Text(f"[RT {dot_text} {last_ok}]", style=f"bold {live_color}")
 
-    row = Table.grid(expand=True)
-    row.add_column(justify="left", ratio=1)
-    row.add_column(justify="center", ratio=2)
-    row.add_column(justify="right", ratio=1)
-    row.add_row(left, Group(banner, subtitle, sub2), right)
+    indicator_row = Table.grid(expand=True)
+    indicator_row.add_column(justify="left", ratio=1)
+    indicator_row.add_column(justify="center", ratio=2)
+    indicator_row.add_column(justify="right", ratio=1)
+    indicator_row.add_row(left, Text(""), right)
 
-    return Padding(row, (1, 0, 0, 0))
+    header_group = Group(
+        indicator_row,
+        Align.center(banner),
+        Align.center(subtitle),
+    )
+    return Padding(header_group, (1, 0, 0, 0))
 
 
 # --- KPI 카드 ---
@@ -1504,7 +1508,7 @@ def build_layout(
     alert_size = min(10, 3 + max(0, len(data.insights.alerts)))
     footer_size = 3
     outer_margin = 2 if compact else 3
-    gap = 1 if compact else 2
+    gap = 1
 
     # 화면 바깥 좌우 여백
     root.split_row(
@@ -1565,7 +1569,7 @@ def build_layout(
     work_type_panel_width = 44 if compact else 50
     category_panel_width = 48 if compact else 58
     department_panel_width = 46 if compact else 54
-    bottom_gap = 10 if compact else 12
+    bottom_gap = 0 if compact else 1
     root["left_bottom"].split_row(
         Layout(name="left_bottom_pad_l", ratio=1),
         Layout(name="work_type", size=work_type_panel_width),
