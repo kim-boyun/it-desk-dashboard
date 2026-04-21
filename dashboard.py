@@ -53,8 +53,12 @@ DEFAULT_DB_URL = (
     "kdis_ticket?options=-csearch_path%3Dticket"
 )
 DEFAULT_REFRESH_SEC = 30
+# 하단(작업유형·카테고리) 전체 표시를 위해 기본은 짧게; --limit-recent로 늘릴 수 있음
 DEFAULT_RECENT_LIMIT = 8
-BOTTOM_PANEL_MAX_ROWS = 8
+# 요청현황 패널: 데이터 행 + 타이틀·테이블 헤더·테두리 대략치
+RECENT_PANEL_OVERHEAD = 4
+# 담당자 워크로드: 데이터 행 + 패널 타이틀·테이블 헤더·테두리(담당자 열은 1행 고정)
+WORKLOAD_PANEL_OVERHEAD = 6
 NEW_ALERT_DURATION_SEC = 4.0
 NEW_ALERT_BLINK_SEC = 0.45
 LIVE_SPINNER_FRAMES = ("|", "/", "-", "\\")
@@ -65,8 +69,6 @@ LIVE_BLINK_SEC = 0.5
 STALE_THRESHOLD_DAYS = 3       # N일 이상 미해결이면 노후로 간주
 RECENT_TITLE_MAX = 36          # 최근 요청 제목 표시 최대 길이
 RECENT_CATEGORY_MAX = 18       # 최근 요청 카테고리 최대 길이(줄바꿈 방지)
-WORKLOAD_BAR_WIDTH = 12        # 담당자 워크로드 막대 너비
-SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 LOGGER = logging.getLogger("it_desk_dashboard")
 
@@ -102,8 +104,6 @@ class Theme:
     ok: str
     warn: str
     danger: str
-    bar_filled: str
-    bar_empty: str
     status_open: str
     status_in_progress: str
     status_resolved: str
@@ -135,8 +135,6 @@ THEMES: dict[str, Theme] = {
         ok="green",
         warn="yellow",
         danger="red",
-        bar_filled="bright_cyan",
-        bar_empty="grey30",
         status_open="yellow",
         status_in_progress="cyan",
         status_resolved="green",
@@ -150,8 +148,6 @@ THEMES: dict[str, Theme] = {
         ok="bright_white",
         warn="bright_white",
         danger="bright_white",
-        bar_filled="bright_white",
-        bar_empty="grey30",
         status_open="bright_white",
         status_in_progress="white",
         status_resolved="white",
@@ -177,12 +173,6 @@ class SummaryMetrics:
 
 
 @dataclass
-class StatusCount:
-    status: str
-    count: int
-
-
-@dataclass
 class AssigneeWorkload:
     assignee: str
     pending_count: int
@@ -203,14 +193,6 @@ class CategoryToday:
 @dataclass
 class WorkTypeToday:
     work_type: str
-    today_count: int
-    week_count: int
-    total_count: int
-
-
-@dataclass
-class DepartmentToday:
-    department: str
     today_count: int
     week_count: int
     total_count: int
@@ -260,11 +242,9 @@ class Insights:
 @dataclass
 class DashboardData:
     summary: SummaryMetrics
-    by_status: list[StatusCount]
     by_assignee_workload: list[AssigneeWorkload]
     by_category_today: list[CategoryToday]
     by_work_type_today: list[WorkTypeToday]
-    by_department_today: list[DepartmentToday]
     recent_requests: list[RecentRequest]
     trend_7d: list[TrendPoint]
     insights: Insights
@@ -273,12 +253,10 @@ class DashboardData:
 
 @dataclass
 class ViewOptions:
-    bottom_max_rows: int
     recent_show_category: bool
     recent_show_requester: bool
     recent_show_created: bool
     bottom_show_week: bool
-    bottom_show_total: bool
     workload_show_week: bool
     workload_show_total: bool
 
@@ -288,20 +266,11 @@ def derive_view_options(term_width: int, term_height: int, force_compact: bool) 
     compact = force_compact or term_width < 160 or term_height < 46
     very_compact = term_width < 140 or term_height < 40
 
-    if term_height >= 56:
-        bottom_rows = 8
-    elif term_height >= 48:
-        bottom_rows = 6
-    else:
-        bottom_rows = 5
-
     return ViewOptions(
-        bottom_max_rows=bottom_rows,
         recent_show_category=(not very_compact),
         recent_show_requester=(not very_compact),
         recent_show_created=(not compact),
         bottom_show_week=(not very_compact),
-        bottom_show_total=(term_width >= 175 and not compact),
         workload_show_week=(not very_compact),
         workload_show_total=(term_width >= 170 and not compact),
     )
@@ -344,20 +313,16 @@ class DashboardRepository:
 
     def fetch(self, recent_limit: int) -> DashboardData:
         summary = self._fetch_summary()
-        by_status = self._fetch_status_counts()
         workload = self._fetch_assignee_workload()
         category_today = self._fetch_category_today()
         work_type_today = self._fetch_work_type_today()
-        department_today = self._fetch_department_today()
         recent = self._fetch_recent_requests(recent_limit)
         trend = self._fetch_trend_7d()
         return DashboardData(
             summary=summary,
-            by_status=by_status,
             by_assignee_workload=workload,
             by_category_today=category_today,
             by_work_type_today=work_type_today,
-            by_department_today=department_today,
             recent_requests=recent,
             trend_7d=trend,
             insights=Insights(),  # compute_insights에서 채움
@@ -412,25 +377,6 @@ class DashboardRepository:
             unassigned_pending=int(row.get("unassigned_pending") or 0),
             stale_open=int(row.get("stale_open") or 0),
         )
-
-    def _fetch_status_counts(self) -> list[StatusCount]:
-        with self.conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                """
-                WITH bounds AS (
-                    SELECT date_trunc('week', now() AT TIME ZONE 'Asia/Seoul') AS kst_week_start
-                )
-                SELECT status, count(*)::int AS count
-                FROM tickets t
-                CROSS JOIN bounds b
-                WHERE (t.created_at AT TIME ZONE 'Asia/Seoul') >= b.kst_week_start
-                GROUP BY status
-                """
-            )
-            rows = cur.fetchall()
-        seen = {str(r["status"]): int(r["count"] or 0) for r in rows}
-        # 상태 4종은 항상 노출(0 포함)
-        return [StatusCount(status=k, count=seen.get(k, 0)) for k in STATUS_LABEL]
 
     def _fetch_assignee_workload(self) -> list[AssigneeWorkload]:
         """admin 전원 + 미배정. 다중 담당자(`ticket_assignees`) 기준."""
@@ -545,7 +491,7 @@ class DashboardRepository:
         ]
 
     def _fetch_category_today(self) -> list[CategoryToday]:
-        """카테고리별 오늘/이번주/총 건수. 모든 카테고리 + 미분류, 0건 포함."""
+        """카테고리별 오늘/이번주/총 건수. ticket_categories 기준, 0건 포함(미분류 제외)."""
         with self.conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
@@ -584,13 +530,8 @@ class DashboardRepository:
                     LEFT JOIN today_category tc ON tc.category_id = c.id
                     LEFT JOIN week_category wc ON wc.category_id = c.id
                     LEFT JOIN total_category tt ON tt.category_id = c.id
-                    UNION ALL
-                    SELECT '미분류',
-                        COALESCE((SELECT count FROM today_category WHERE category_id IS NULL), 0)::int,
-                        COALESCE((SELECT count FROM week_category WHERE category_id IS NULL), 0)::int,
-                        COALESCE((SELECT count FROM total_category WHERE category_id IS NULL), 0)::int
                 ) x
-                ORDER BY today_count DESC, week_count DESC, total_count DESC, category ASC
+                ORDER BY total_count DESC, category ASC
                 """
             )
             rows = cur.fetchall()
@@ -665,76 +606,13 @@ class DashboardRepository:
                 LEFT JOIN today_work_type twt ON twt.work_type_key = wb.work_type_key
                 LEFT JOIN week_work_type wwt ON wwt.work_type_key = wb.work_type_key
                 LEFT JOIN total_work_type tt ON tt.work_type_key = wb.work_type_key
-                ORDER BY wb.ord
+                ORDER BY COALESCE(tt.count, 0) DESC, wb.ord ASC
                 """
             )
             rows = cur.fetchall()
         return [
             WorkTypeToday(
                 work_type=str(r["work_type"]),
-                today_count=int(r["today_count"] or 0),
-                week_count=int(r["week_count"] or 0),
-                total_count=int(r["total_count"] or 0),
-            )
-            for r in rows
-        ]
-
-    def _fetch_department_today(self) -> list[DepartmentToday]:
-        """부서별 오늘/이번주/총 요청 건수(요청 시점 snapshot 부서 기준)."""
-        with self.conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                """
-                WITH bounds AS (
-                    SELECT
-                        date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') AS kst_today,
-                        date_trunc('week', now() AT TIME ZONE 'Asia/Seoul') AS kst_week_start
-                ),
-                base AS (
-                    SELECT DISTINCT COALESCE(NULLIF(t.requester_department, ''), '미기재') AS department
-                    FROM tickets t
-                ),
-                today_dept AS (
-                    SELECT
-                        COALESCE(NULLIF(t.requester_department, ''), '미기재') AS department,
-                        count(*)::int AS count
-                    FROM tickets t
-                    CROSS JOIN bounds b
-                    WHERE (t.created_at AT TIME ZONE 'Asia/Seoul') >= b.kst_today
-                    GROUP BY 1
-                ),
-                week_dept AS (
-                    SELECT
-                        COALESCE(NULLIF(t.requester_department, ''), '미기재') AS department,
-                        count(*)::int AS count
-                    FROM tickets t
-                    CROSS JOIN bounds b
-                    WHERE (t.created_at AT TIME ZONE 'Asia/Seoul') >= b.kst_week_start
-                    GROUP BY 1
-                ),
-                total_dept AS (
-                    SELECT
-                        COALESCE(NULLIF(t.requester_department, ''), '미기재') AS department,
-                        count(*)::int AS count
-                    FROM tickets t
-                    GROUP BY 1
-                )
-                SELECT
-                    b.department,
-                    COALESCE(td.count, 0)::int AS today_count,
-                    COALESCE(wd.count, 0)::int AS week_count,
-                    COALESCE(tt.count, 0)::int AS total_count
-                FROM base b
-                LEFT JOIN today_dept td ON td.department = b.department
-                LEFT JOIN week_dept wd ON wd.department = b.department
-                LEFT JOIN total_dept tt ON tt.department = b.department
-                ORDER BY today_count DESC, b.department ASC
-                LIMIT 10
-                """
-            )
-            rows = cur.fetchall()
-        return [
-            DepartmentToday(
-                department=str(r["department"]),
                 today_count=int(r["today_count"] or 0),
                 week_count=int(r["week_count"] or 0),
                 total_count=int(r["total_count"] or 0),
@@ -952,26 +830,6 @@ def humanize_age(hours: float) -> str:
     return f"{int(hours / 24)}일"
 
 
-def sparkline(values: list[int]) -> str:
-    if not values:
-        return ""
-    mx = max(values)
-    if mx == 0:
-        return SPARK_CHARS[0] * len(values)
-    n = len(SPARK_CHARS) - 1
-    return "".join(SPARK_CHARS[min(n, int(v / mx * n))] for v in values)
-
-
-def _bar(value: int, max_value: int, width: int, theme: Theme) -> Text:
-    if max_value <= 0 or width <= 0:
-        return Text("░" * max(0, width), style=theme.bar_empty)
-    filled = max(0, min(width, int(round(value / max_value * width))))
-    bar = Text()
-    bar.append("█" * filled, style=theme.bar_filled)
-    bar.append("░" * (width - filled), style=theme.bar_empty)
-    return bar
-
-
 def _trend_indicator(today: int, yesterday: int, theme: Theme, *, higher_is_better: bool) -> Text:
     """전일 대비 추세 (상태에 맞는 색상 부여)."""
     if today == 0 and yesterday == 0:
@@ -1019,7 +877,7 @@ def render_header(
     last_ok = last_ok_text or "--:--:--"
 
     left = Text(f"[LIVE {spinner_text}]", style=f"bold {live_color}")
-    center = Text(f"실시간 운영 상황판  ·  schema={schema_label or 'default'}", style=theme.info)
+    center = Text("", style=theme.info)
     right = Text(f"[RT {dot_text} {last_ok}]", style=f"bold {live_color}")
 
     indicator_row = Table.grid(expand=True)
@@ -1247,35 +1105,6 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
     return Panel(table, box=box.SQUARE, border_style=theme.muted, title=title, title_align="left")
 
 
-# --- 상태 분포 ---
-
-def render_status_distribution(rows: list[StatusCount], theme: Theme) -> Panel:
-    total = sum(r.count for r in rows)
-    table = Table(
-        box=box.SIMPLE, expand=True, show_edge=False, pad_edge=False,
-        header_style=f"bold {theme.accent}",
-    )
-    table.add_column("상태", style="bold", width=8)
-    table.add_column("건수", justify="right", width=6)
-    table.add_column("비중", justify="right", width=6, style=theme.muted)
-    table.add_column("분포", ratio=1)
-
-    max_count = max((r.count for r in rows), default=1)
-    for r in rows:
-        col = theme.status_color(r.status)
-        pct = (r.count / total * 100.0) if total > 0 else 0.0
-        table.add_row(
-            Text(STATUS_LABEL.get(r.status, r.status), style=col),
-            Text(f"{r.count}", style=f"bold {col}"),
-            f"{pct:.0f}%",
-            _bar(r.count, max_count, 16, theme),
-        )
-    return Panel(
-        table, box=box.SQUARE, border_style=theme.muted,
-        title=f"[bold {theme.accent}]이번주 상태 분포[/]", title_align="left",
-    )
-
-
 # --- 담당자 워크로드 ---
 
 def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme, view: ViewOptions) -> Panel:
@@ -1284,7 +1113,7 @@ def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme, view: V
         header_style=f"bold {theme.accent}",
     )
     table.add_column("순위", justify="right", width=4, style=theme.muted)
-    table.add_column("담당자", overflow="fold", ratio=1)
+    table.add_column("담당자", overflow="ellipsis", no_wrap=True, ratio=1)
     table.add_column("미처리", justify="right", width=6)
     table.add_column("오늘", justify="right", width=6)
     if view.workload_show_week:
@@ -1346,23 +1175,19 @@ def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme, view: V
 # --- 오늘 카테고리 ---
 
 def render_category_today(rows: list[CategoryToday], theme: Theme, view: ViewOptions) -> Panel:
-    rows = rows[:view.bottom_max_rows]
     table = Table(
-        box=box.SIMPLE, expand=False, show_edge=False, pad_edge=False,
+        box=box.SIMPLE, expand=True, show_edge=False, pad_edge=False,
         header_style=f"bold {theme.accent}",
     )
-    table.add_column("카테고리", no_wrap=True, overflow="ellipsis", width=24)
+    table.add_column("카테고리", no_wrap=True, overflow="ellipsis", ratio=1)
     table.add_column("오늘", justify="right", width=6)
+    table.add_column("총", justify="right", width=6)
     if view.bottom_show_week:
         table.add_column("이번주", justify="right", width=7)
-    if view.bottom_show_total:
-        table.add_column("총", justify="right", width=6)
 
     if not rows:
-        empty = ["데이터 없음", "0"]
+        empty = ["데이터 없음", "0", "0"]
         if view.bottom_show_week:
-            empty.append("0")
-        if view.bottom_show_total:
             empty.append("0")
         table.add_row(*empty)
     else:
@@ -1371,37 +1196,32 @@ def render_category_today(rows: list[CategoryToday], theme: Theme, view: ViewOpt
             cells: list[RenderableType] = [
                 Text(r.category, style=color),
                 Text(str(r.today_count), style=f"bold {color}" if r.today_count > 0 else theme.muted),
+                Text(str(r.total_count), style=theme.info if r.total_count > 0 else theme.muted),
             ]
             if view.bottom_show_week:
                 cells.append(Text(str(r.week_count), style=theme.info if r.week_count > 0 else theme.muted))
-            if view.bottom_show_total:
-                cells.append(Text(str(r.total_count), style=theme.info if r.total_count > 0 else theme.muted))
             table.add_row(*cells)
 
     return Panel(
-        Align.left(table), box=box.SQUARE, border_style=theme.muted,
+        table, box=box.SQUARE, border_style=theme.muted,
         title=f"[bold {theme.accent}]카테고리 현황[/]", title_align="left",
     )
 
 
 def render_work_type_today(rows: list[WorkTypeToday], theme: Theme, view: ViewOptions) -> Panel:
-    rows = rows[:view.bottom_max_rows]
     table = Table(
-        box=box.SIMPLE, expand=False, show_edge=False, pad_edge=False,
+        box=box.SIMPLE, expand=True, show_edge=False, pad_edge=False,
         header_style=f"bold {theme.accent}",
     )
-    table.add_column("작업 유형", no_wrap=True, overflow="ellipsis", width=14)
+    table.add_column("작업 유형", no_wrap=True, overflow="ellipsis", ratio=1)
     table.add_column("오늘", justify="right", width=6)
+    table.add_column("총", justify="right", width=6)
     if view.bottom_show_week:
         table.add_column("이번주", justify="right", width=7)
-    if view.bottom_show_total:
-        table.add_column("총", justify="right", width=6)
 
     if not rows:
-        empty = ["데이터 없음", "0"]
+        empty = ["데이터 없음", "0", "0"]
         if view.bottom_show_week:
-            empty.append("0")
-        if view.bottom_show_total:
             empty.append("0")
         table.add_row(*empty)
     else:
@@ -1410,55 +1230,15 @@ def render_work_type_today(rows: list[WorkTypeToday], theme: Theme, view: ViewOp
             cells: list[RenderableType] = [
                 Text(r.work_type, style=color),
                 Text(str(r.today_count), style=f"bold {color}" if r.today_count > 0 else theme.muted),
+                Text(str(r.total_count), style=theme.info if r.total_count > 0 else theme.muted),
             ]
             if view.bottom_show_week:
                 cells.append(Text(str(r.week_count), style=theme.info if r.week_count > 0 else theme.muted))
-            if view.bottom_show_total:
-                cells.append(Text(str(r.total_count), style=theme.info if r.total_count > 0 else theme.muted))
             table.add_row(*cells)
 
     return Panel(
-        Align.left(table), box=box.SQUARE, border_style=theme.muted,
+        table, box=box.SQUARE, border_style=theme.muted,
         title=f"[bold {theme.accent}]작업 유형 현황[/]", title_align="left",
-    )
-
-
-def render_department_today(rows: list[DepartmentToday], theme: Theme, view: ViewOptions) -> Panel:
-    rows = rows[:view.bottom_max_rows]
-    table = Table(
-        box=box.SIMPLE, expand=False, show_edge=False, pad_edge=False,
-        header_style=f"bold {theme.accent}",
-    )
-    table.add_column("부서", no_wrap=True, overflow="ellipsis", width=22)
-    table.add_column("오늘", justify="right", width=6)
-    if view.bottom_show_week:
-        table.add_column("이번주", justify="right", width=7)
-    if view.bottom_show_total:
-        table.add_column("총", justify="right", width=6)
-
-    if not rows:
-        empty = ["데이터 없음", "0"]
-        if view.bottom_show_week:
-            empty.append("0")
-        if view.bottom_show_total:
-            empty.append("0")
-        table.add_row(*empty)
-    else:
-        for r in rows:
-            color = theme.info if (r.today_count > 0 or r.week_count > 0 or r.total_count > 0) else theme.muted
-            cells: list[RenderableType] = [
-                Text(r.department, style=color),
-                Text(str(r.today_count), style=f"bold {color}" if r.today_count > 0 else theme.muted),
-            ]
-            if view.bottom_show_week:
-                cells.append(Text(str(r.week_count), style=theme.info if r.week_count > 0 else theme.muted))
-            if view.bottom_show_total:
-                cells.append(Text(str(r.total_count), style=theme.info if r.total_count > 0 else theme.muted))
-            table.add_row(*cells)
-
-    return Panel(
-        Align.left(table), box=box.SQUARE, border_style=theme.muted,
-        title=f"[bold {theme.accent}]부서 요청 현황[/]", title_align="left",
     )
 
 
@@ -1466,17 +1246,13 @@ def render_department_today(rows: list[DepartmentToday], theme: Theme, view: Vie
 
 def render_trend(rows: list[TrendPoint], theme: Theme) -> Panel:
     counts = [r.count for r in rows]
-    spark = sparkline(counts)
-    total = sum(counts)
-    avg = total / len(counts) if counts else 0
+    avg = sum(counts) / len(counts) if counts else 0
     today = counts[-1] if counts else 0
     delta = today - avg
 
     today_color = theme.warn if delta > 0 else (theme.ok if delta < 0 else theme.muted)
     summary = Text()
-    summary.append("5일 합계 ", style=theme.muted)
-    summary.append(f"{total}건", style=f"bold {theme.accent}")
-    summary.append("   평균 ", style=theme.muted)
+    summary.append("평균 ", style=theme.muted)
     summary.append(f"{avg:.1f}건", style=theme.info)
     summary.append("   오늘 ", style=theme.muted)
     summary.append(f"{today}건 ({delta:+.1f})", style=today_color)
@@ -1505,7 +1281,6 @@ def render_trend(rows: list[TrendPoint], theme: Theme) -> Panel:
         grid.add_row(Text("데이터 없음", style=theme.muted))
 
     body = Group(
-        Align.center(Text(spark, style=f"bold {theme.accent}")),
         Align.center(summary),
         Rule(style=theme.muted),
         grid,
@@ -1586,7 +1361,7 @@ def build_layout(
     last_ok_text: str | None = None,
 ) -> Layout:
     root = Layout(name="root")
-    header_size = 2
+    header_size = 1
     kpi_size = 5
     alert_size = max(3, min(8, 2 + max(0, len(data.insights.alerts))))
     footer_size = 0
@@ -1616,20 +1391,19 @@ def build_layout(
     root["v_gap_2"].update(Text(""))
     root["v_gap_3"].update(Text(""))
 
-    # 본문: 좌측(최근요청 + 작업유형/카테고리/부서), 우측(상태/추세/워크로드) 구조
+    # 본문: 좌측(요청현황 + 작업유형/카테고리), 우측(5일 추세/워크로드) 구조
     workload_rows = len(data.by_assignee_workload)
     category_rows = len(data.by_category_today)
     work_type_rows = len(data.by_work_type_today)
-    department_rows = len(data.by_department_today)
-    # 요청 현황 패널 높이 축소(하단 3패널을 위로 당김)
-    recent_size = 12 if compact else 13
-    workload_size = max(6, workload_rows + 4)
-    category_size = max(6, min(view.bottom_max_rows, category_rows) + 4)
-    work_type_size = max(6, min(view.bottom_max_rows, work_type_rows) + 4)
-    department_size = max(6, min(view.bottom_max_rows, department_rows) + 4)
-    left_bottom_size = max(category_size, work_type_size, department_size)
+    # 요청현황은 행 수만큼만 채워 공간을 줄이고, 작업유형·카테고리 전체 행 표시에 넘김
+    recent_size = max(8, len(data.recent_requests) + RECENT_PANEL_OVERHEAD)
+    bottom_panel_chrome = 4
+    category_size = max(6, category_rows + bottom_panel_chrome)
+    work_type_size = max(6, work_type_rows + bottom_panel_chrome)
+    left_bottom_size = max(category_size, work_type_size)
+    workload_size = max(6, workload_rows + WORKLOAD_PANEL_OVERHEAD)
 
-    # 본문 좌/우 폭. 우측 컬럼(상태/추세/워크로드)은 동일 너비로 유지
+    # 본문 좌/우 폭. 우측 컬럼(추세/워크로드)은 동일 너비로 유지
     root["body"].split_row(
         Layout(name="left_main", ratio=5),
         Layout(name="h_gap", size=gap),
@@ -1652,24 +1426,17 @@ def build_layout(
         Layout(name="work_type", ratio=1),
         Layout(name="left_bottom_gap", size=bottom_gap),
         Layout(name="category", ratio=1),
-        Layout(name="left_bottom_gap_2", size=bottom_gap),
-        Layout(name="department", ratio=1),
     )
     root["left_bottom_gap"].update(Text(""))
-    root["left_bottom_gap_2"].update(Text(""))
 
-    # 우측: 상태 분포 / 최근 7일 추세 / 담당자 워크로드
-    # 세 패널 모두 right_main 안에 있어 동일 너비를 갖는다.
+    # 우측: 최근 5일 신규 추세 / 담당자 워크로드(행 수에 맞춘 고정 높이, 나머지는 spacer)
     root["right_main"].split_column(
-        Layout(name="status", size=7),
-        Layout(name="right_gap_1", size=gap),
         Layout(name="trend", size=8),
-        Layout(name="right_gap_2", size=gap),
+        Layout(name="right_gap_1", size=gap),
         Layout(name="workload", size=workload_size),
         Layout(name="right_spacer", ratio=1),
     )
     root["right_gap_1"].update(Text(""))
-    root["right_gap_2"].update(Text(""))
     root["right_spacer"].update(Text(""))
 
     root["header"].update(render_header(
@@ -1692,11 +1459,9 @@ def build_layout(
     root["alert"].update(render_alerts(data.insights, theme, new_event_message=new_event_message))
     root["recent"].update(render_recent_requests(data.recent_requests, theme, compact, view))
     root["workload"].update(Padding(render_assignee_workload(data.by_assignee_workload, theme, view), (0, 1)))
-    root["status"].update(Padding(render_status_distribution(data.by_status, theme), (0, 1)))
     root["trend"].update(Padding(render_trend(data.trend_7d, theme), (0, 1)))
     root["category"].update(render_category_today(data.by_category_today, theme, view))
     root["work_type"].update(render_work_type_today(data.by_work_type_today, theme, view))
-    root["department"].update(render_department_today(data.by_department_today, theme, view))
     return root
 
 
