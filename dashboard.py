@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -209,7 +209,7 @@ class RecentRequest:
     status: str
     priority: str
     created_at_kst: str
-    age_hours: float
+    created_at: datetime  # 경과는 렌더 시점마다 재계산 (DB 폴링 주기와 무관하게 최신화)
 
 
 @dataclass
@@ -621,7 +621,7 @@ class DashboardRepository:
         ]
 
     def _fetch_recent_requests(self, limit: int) -> list[RecentRequest]:
-        """다중 담당자 집계 + 우선순위/노후성 표기를 위해 priority, age_hours 포함."""
+        """다중 담당자 집계 + 우선순위/노후성 표기. 경과는 created_at으로 화면에서 계산."""
         with self.conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 """
@@ -649,7 +649,7 @@ class DashboardRepository:
                     COALESCE(an.assignees, NULLIF(au.kor_name,''), t.assignee_emp_no) AS assignee,
                     (an.ticket_id IS NULL AND t.assignee_emp_no IS NULL) AS is_unassigned,
                     to_char((t.created_at AT TIME ZONE 'Asia/Seoul'), 'MM-DD HH24:MI') AS created_at_kst,
-                    EXTRACT(EPOCH FROM (now() - t.created_at)) / 3600.0 AS age_hours
+                    t.created_at AS created_at
                 FROM tickets t
                 LEFT JOIN ticket_categories c ON c.id = t.category_id
                 LEFT JOIN users ru ON ru.emp_no = t.requester_emp_no
@@ -685,7 +685,7 @@ class DashboardRepository:
                 status=str(r["status"] or ""),
                 priority=str(r["priority"] or "medium"),
                 created_at_kst=str(r["created_at_kst"] or ""),
-                age_hours=float(r["age_hours"] or 0.0),
+                created_at=r["created_at"] if r.get("created_at") is not None else datetime.now(timezone.utc),
             )
             for r in rows
         ]
@@ -823,11 +823,32 @@ def truncate(text: str, max_len: int) -> str:
 
 
 def humanize_age(hours: float) -> str:
+    """경과 표시. 24시간 미만은 분 단위까지 표시해 같은 'N시간'으로 고정되지 않게 한다."""
     if hours < 1:
         return f"{max(0, int(hours * 60))}분"
     if hours < 24:
-        return f"{int(hours)}시간"
-    return f"{int(hours / 24)}일"
+        h = int(hours)
+        m = int(round((hours - h) * 60))
+        if m >= 60:
+            h += 1
+            m = 0
+        if m == 0:
+            return f"{h}시간"
+        return f"{h}시간{m}분"
+    d = int(hours // 24)
+    rem = int(hours - d * 24)
+    if rem < 1:
+        return f"{d}일"
+    return f"{d}일{rem}시간"
+
+
+def live_age_hours(created_at: datetime) -> float:
+    """등록 시각 대비 경과(시간). DB 조회와 무관하게 매 프레임 갱신 가능."""
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    cur = created_at.astimezone(timezone.utc)
+    return max(0.0, (now - cur).total_seconds() / 3600.0)
 
 
 def _trend_indicator(today: int, yesterday: int, theme: Theme, *, higher_is_better: bool) -> Text:
@@ -1032,7 +1053,7 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
     table.add_column("상태", justify="center", width=8)
     if view.recent_show_created:
         table.add_column("등록", justify="center", width=11, style=theme.muted)
-    table.add_column("경과", justify="right", width=6)
+    table.add_column("경과", justify="right", width=10, no_wrap=True)
 
     if not rows:
         empty = ["-"]
@@ -1065,12 +1086,13 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
                 if r.is_unassigned else Text(r.assignee or "-")
             )
 
+            ah = live_age_hours(r.created_at)
             # 경과 시간 색상 (미해결 상태일 때만 강조)
             age_color = theme.muted
             if r.status in ("open", "in_progress"):
-                if r.age_hours >= STALE_THRESHOLD_DAYS * 24:
+                if ah >= STALE_THRESHOLD_DAYS * 24:
                     age_color = theme.danger
-                elif r.age_hours >= 24:
+                elif ah >= 24:
                     age_color = theme.warn
 
             cells = [Text(f"#{r.id}", style=theme.muted), title_text]
@@ -1084,7 +1106,7 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
             ])
             if view.recent_show_created:
                 cells.append(Text(r.created_at_kst, style=theme.muted))
-            cells.append(Text(humanize_age(r.age_hours), style=age_color))
+            cells.append(Text(humanize_age(ah), style=age_color))
 
             # 완료/사업검토 건은 dim 처리 → 미처리 행이 시각적으로 도드라짐
             if is_completed:
