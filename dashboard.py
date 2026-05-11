@@ -168,8 +168,10 @@ class SummaryMetrics:
     yesterday_new: int = 0
     today_done: int = 0
     yesterday_done: int = 0
-    unassigned_pending: int = 0   # 담당자 없는 미처리
-    stale_open: int = 0           # N일 이상 묵힌 미해결
+    unassigned_pending: int = 0         # 담당자 없는 미처리
+    stale_open: int = 0                 # N일 이상 묵힌 미해결
+    long_pending: int = 0               # 7일 이상 미처리
+    avg_resolution_hours: float | None = None  # 최근 30일 평균 처리 시간
 
 
 @dataclass
@@ -350,11 +352,20 @@ class DashboardRepository:
                          AND (t.created_at AT TIME ZONE 'Asia/Seoul') < b.kst_today) AS yesterday_new,
                     (SELECT count(*) FROM tickets t, bounds b
                        WHERE t.status IN ('resolved','closed')
-                         AND (t.updated_at AT TIME ZONE 'Asia/Seoul') >= b.kst_today) AS today_done,
+                         AND (
+                             (t.resolved_at IS NOT NULL AND (t.resolved_at AT TIME ZONE 'Asia/Seoul') >= b.kst_today)
+                          OR (t.closed_at IS NOT NULL AND (t.closed_at AT TIME ZONE 'Asia/Seoul') >= b.kst_today)
+                         )) AS today_done,
                     (SELECT count(*) FROM tickets t, bounds b
                        WHERE t.status IN ('resolved','closed')
-                         AND (t.updated_at AT TIME ZONE 'Asia/Seoul') >= b.kst_yesterday
-                         AND (t.updated_at AT TIME ZONE 'Asia/Seoul') < b.kst_today) AS yesterday_done,
+                         AND (
+                             (t.resolved_at IS NOT NULL
+                              AND (t.resolved_at AT TIME ZONE 'Asia/Seoul') >= b.kst_yesterday
+                              AND (t.resolved_at AT TIME ZONE 'Asia/Seoul') < b.kst_today)
+                          OR (t.closed_at IS NOT NULL
+                              AND (t.closed_at AT TIME ZONE 'Asia/Seoul') >= b.kst_yesterday
+                              AND (t.closed_at AT TIME ZONE 'Asia/Seoul') < b.kst_today)
+                         )) AS yesterday_done,
                     (SELECT count(*) FROM tickets t
                        WHERE t.status IN ('open','in_progress')
                          AND NOT EXISTS (SELECT 1 FROM ticket_assignees ta WHERE ta.ticket_id = t.id)
@@ -362,7 +373,17 @@ class DashboardRepository:
                     (SELECT count(*) FROM tickets t, bounds b
                        WHERE t.status IN ('open','in_progress')
                          AND (t.created_at AT TIME ZONE 'Asia/Seoul') < b.stale_threshold
-                    ) AS stale_open
+                    ) AS stale_open,
+                    (SELECT count(*) FROM tickets t, bounds b
+                       WHERE t.status IN ('open','in_progress')
+                         AND (t.created_at AT TIME ZONE 'Asia/Seoul') < b.kst_today - interval '7 days'
+                    ) AS long_pending,
+                    (SELECT AVG(EXTRACT(EPOCH FROM (COALESCE(t.resolved_at, t.closed_at) - t.created_at)) / 3600.0)
+                       FROM tickets t
+                       WHERE t.status IN ('resolved','closed')
+                         AND COALESCE(t.resolved_at, t.closed_at) IS NOT NULL
+                         AND t.created_at >= NOW() - INTERVAL '30 days'
+                    ) AS avg_resolution_hours
                 """,
                 (STALE_THRESHOLD_DAYS,),
             )
@@ -376,6 +397,8 @@ class DashboardRepository:
             yesterday_done=int(row.get("yesterday_done") or 0),
             unassigned_pending=int(row.get("unassigned_pending") or 0),
             stale_open=int(row.get("stale_open") or 0),
+            long_pending=int(row.get("long_pending") or 0),
+            avg_resolution_hours=float(row["avg_resolution_hours"]) if row.get("avg_resolution_hours") is not None else None,
         )
 
     def _fetch_assignee_workload(self) -> list[AssigneeWorkload]:
@@ -406,7 +429,10 @@ class DashboardRepository:
                     JOIN ticket_assignees ta ON ta.ticket_id = t.id
                     CROSS JOIN bounds b
                     WHERE t.status IN ('resolved','closed')
-                      AND (t.updated_at AT TIME ZONE 'Asia/Seoul') >= b.kst_today
+                      AND (
+                          (t.resolved_at IS NOT NULL AND (t.resolved_at AT TIME ZONE 'Asia/Seoul') >= b.kst_today)
+                       OR (t.closed_at IS NOT NULL AND (t.closed_at AT TIME ZONE 'Asia/Seoul') >= b.kst_today)
+                      )
                     GROUP BY ta.emp_no
                 ),
                 done_week AS (
@@ -415,7 +441,10 @@ class DashboardRepository:
                     JOIN ticket_assignees ta ON ta.ticket_id = t.id
                     CROSS JOIN bounds b
                     WHERE t.status IN ('resolved','closed')
-                      AND (t.updated_at AT TIME ZONE 'Asia/Seoul') >= b.kst_week_start
+                      AND (
+                          (t.resolved_at IS NOT NULL AND (t.resolved_at AT TIME ZONE 'Asia/Seoul') >= b.kst_week_start)
+                       OR (t.closed_at IS NOT NULL AND (t.closed_at AT TIME ZONE 'Asia/Seoul') >= b.kst_week_start)
+                      )
                     GROUP BY ta.emp_no
                 ),
                 done_total AS (
@@ -435,13 +464,19 @@ class DashboardRepository:
                         (SELECT count(*)::int FROM tickets t
                             CROSS JOIN bounds b
                             WHERE t.status IN ('resolved','closed')
-                              AND (t.updated_at AT TIME ZONE 'Asia/Seoul') >= b.kst_today
+                              AND (
+                                  (t.resolved_at IS NOT NULL AND (t.resolved_at AT TIME ZONE 'Asia/Seoul') >= b.kst_today)
+                               OR (t.closed_at IS NOT NULL AND (t.closed_at AT TIME ZONE 'Asia/Seoul') >= b.kst_today)
+                              )
                               AND NOT EXISTS (SELECT 1 FROM ticket_assignees ta WHERE ta.ticket_id = t.id)
                         ) AS done_today_count,
                         (SELECT count(*)::int FROM tickets t
                             CROSS JOIN bounds b
                             WHERE t.status IN ('resolved','closed')
-                              AND (t.updated_at AT TIME ZONE 'Asia/Seoul') >= b.kst_week_start
+                              AND (
+                                  (t.resolved_at IS NOT NULL AND (t.resolved_at AT TIME ZONE 'Asia/Seoul') >= b.kst_week_start)
+                               OR (t.closed_at IS NOT NULL AND (t.closed_at AT TIME ZONE 'Asia/Seoul') >= b.kst_week_start)
+                              )
                               AND NOT EXISTS (SELECT 1 FROM ticket_assignees ta WHERE ta.ticket_id = t.id)
                         ) AS done_week_count,
                         (SELECT count(*)::int FROM tickets t
@@ -823,23 +858,15 @@ def truncate(text: str, max_len: int) -> str:
 
 
 def humanize_age(hours: float) -> str:
-    """경과 표시. 24시간 미만은 분 단위까지 표시해 같은 'N시간'으로 고정되지 않게 한다."""
     if hours < 1:
-        return f"{max(0, int(hours * 60))}분"
+        return "1시간 미만"
     if hours < 24:
-        h = int(hours)
-        m = int(round((hours - h) * 60))
-        if m >= 60:
-            h += 1
-            m = 0
-        if m == 0:
-            return f"{h}시간"
-        return f"{h}시간{m}분"
+        return f"{int(hours)}시간"
     d = int(hours // 24)
-    rem = int(hours - d * 24)
+    rem = int(hours % 24)
     if rem < 1:
         return f"{d}일"
-    return f"{d}일{rem}시간"
+    return f"{d}일 {rem}시간"
 
 
 def live_age_hours(created_at: datetime) -> float:
@@ -956,38 +983,34 @@ def render_kpi_strip(
         theme,
     )
 
-    if ins.throughput_pct is None:
+    if s.today_new == 0:
         rate_value, rate_color = "—", theme.muted
         rate_sub: RenderableType = Text("신규 없음", style=theme.muted)
     else:
-        rate_value = f"{ins.throughput_pct:.0f}%"
-        rate_color = (
-            theme.ok if ins.throughput_pct >= 80
-            else theme.warn if ins.throughput_pct >= 40
-            else theme.danger
-        )
-        rate_sub = Text(f"백로그 {ins.backlog_level}", style=theme.severity_color(ins.backlog_severity))
+        rate_pct = min(999.9, s.today_done / s.today_new * 100.0)
+        rate_value = f"{rate_pct:.0f}%"
+        rate_color = theme.ok if rate_pct >= 80 else (theme.warn if rate_pct >= 40 else theme.danger)
+        rate_sub = Text(f"신규 {s.today_new}건 대비", style=theme.muted)
     card_rate = _kpi_card("처리율", rate_value, rate_sub, rate_color, theme)
 
-    pending_color = theme.severity_color(ins.backlog_severity)
-    pending_sub = Text()
-    pending_sub.append("미배정 ", style=theme.muted)
-    pending_sub.append(
-        f"{s.unassigned_pending}",
-        style=f"bold {theme.warn}" if s.unassigned_pending > 0 else theme.muted,
-    )
-    pending_sub.append("  ·  노후 ", style=theme.muted)
-    pending_sub.append(
-        f"{s.stale_open}",
-        style=f"bold {theme.warn}" if s.stale_open > 0 else theme.muted,
-    )
-    card_pending = _kpi_card("미처리", f"{s.pending_tickets}건", pending_sub, pending_color, theme)
+    if s.avg_resolution_hours is None:
+        avg_value, avg_color = "—", theme.muted
+        avg_sub: RenderableType = Text("완료 데이터 없음", style=theme.muted)
+    else:
+        avg_value = humanize_age(s.avg_resolution_hours)
+        avg_color = (
+            theme.ok if s.avg_resolution_hours < 24
+            else theme.warn if s.avg_resolution_hours < 72
+            else theme.danger
+        )
+        avg_sub = Text("최근 30일 평균", style=theme.muted)
+    card_avg = _kpi_card("평균 처리 시간", avg_value, avg_sub, avg_color, theme)
 
     # Columns(expand=True)가 의도대로 안 펼쳐지는 경우가 있어 Table.grid로 폭을 4등분
     grid = Table.grid(expand=True, padding=(0, 1))
     for _ in range(4):
         grid.add_column(ratio=1)
-    grid.add_row(card_new, card_done, card_rate, card_pending)
+    grid.add_row(card_new, card_done, card_rate, card_avg)
     return Padding(grid, (0, 1))  # 좌우 여백 최소화
 
 
@@ -1266,11 +1289,21 @@ def render_work_type_today(rows: list[WorkTypeToday], theme: Theme, view: ViewOp
 
 # --- 7일 추세 ---
 
+_SPARK_LEVELS = " ▁▂▃▄▅▆▇█"
+
+def _spark_bar(count: int, max_count: int) -> str:
+    if max_count == 0:
+        return _SPARK_LEVELS[0]
+    idx = round(count / max_count * (len(_SPARK_LEVELS) - 1))
+    return _SPARK_LEVELS[max(0, min(idx, len(_SPARK_LEVELS) - 1))]
+
+
 def render_trend(rows: list[TrendPoint], theme: Theme) -> Panel:
     counts = [r.count for r in rows]
     avg = sum(counts) / len(counts) if counts else 0
     today = counts[-1] if counts else 0
     delta = today - avg
+    max_count = max(counts) if counts else 0
 
     today_color = theme.warn if delta > 0 else (theme.ok if delta < 0 else theme.muted)
     summary = Text()
@@ -1279,26 +1312,33 @@ def render_trend(rows: list[TrendPoint], theme: Theme) -> Panel:
     summary.append("   오늘 ", style=theme.muted)
     summary.append(f"{today}건 ({delta:+.1f})", style=today_color)
 
-    # 날짜/건수를 가로 2행으로 표시 → 세로 공간 대폭 절약
     grid = Table(
         box=None, expand=True, show_edge=False, pad_edge=False, show_header=False,
-        padding=(0, 0),
+        padding=(0, 1),
     )
     for _ in rows or [None]:
         grid.add_column(justify="center")
+
     if rows:
-        max_count = max(counts) if counts else 0
-        grid.add_row(*[Text(r.label, style=theme.muted) for r in rows])
-        count_cells: list[Text] = []
+        spark_cells: list[Text] = []
         for r in rows:
+            bar = _spark_bar(r.count, max_count)
+            is_today = r is rows[-1]
+            is_max = r.count == max_count and max_count > 0
             if r.count == 0:
-                style = theme.muted
-            elif max_count and r.count == max_count:
-                style = f"bold {theme.accent}"
+                bar_style = theme.muted
+            elif is_today:
+                bar_style = f"bold {theme.accent}"
+            elif is_max:
+                bar_style = theme.warn
             else:
-                style = theme.info
-            count_cells.append(Text(str(r.count), style=style))
-        grid.add_row(*count_cells)
+                bar_style = theme.info
+            cell = Text(justify="center")
+            cell.append(f"{bar}\n", style=bar_style)
+            cell.append(str(r.count), style=bar_style if r.count > 0 else theme.muted)
+            cell.append(f"\n{r.label}", style=theme.muted)
+            spark_cells.append(cell)
+        grid.add_row(*spark_cells)
     else:
         grid.add_row(Text("데이터 없음", style=theme.muted))
 
