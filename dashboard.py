@@ -79,21 +79,6 @@ STATUS_LABEL: dict[str, str] = {
     "closed": "사업검토",
 }
 
-PRIORITY_LABEL: dict[str, str] = {
-    "urgent": "긴급",
-    "high": "높음",
-    "medium": "보통",
-    "low": "낮음",
-}
-
-PRIORITY_STYLE: dict[str, str] = {
-    "urgent": "bold red",
-    "high": "bold yellow",
-    "medium": "white",
-    "low": "grey50",
-}
-
-
 @dataclass(frozen=True)
 class Theme:
     """일관된 색상 팔레트."""
@@ -209,7 +194,6 @@ class RecentRequest:
     assignee: str
     is_unassigned: bool
     status: str
-    priority: str
     created_at_kst: str
     created_at: datetime  # 경과는 렌더 시점마다 재계산 (DB 폴링 주기와 무관하게 최신화)
 
@@ -677,7 +661,6 @@ class DashboardRepository:
                 SELECT
                     t.id,
                     t.title,
-                    t.priority,
                     t.status,
                     COALESCE(NULLIF(c.name,''), '미분류') AS category,
                     COALESCE(NULLIF(ru.kor_name,''), t.requester_emp_no) AS requester,
@@ -718,7 +701,6 @@ class DashboardRepository:
                 assignee=str(r["assignee"] or "미배정"),
                 is_unassigned=bool(r["is_unassigned"]),
                 status=str(r["status"] or ""),
-                priority=str(r["priority"] or "medium"),
                 created_at_kst=str(r["created_at_kst"] or ""),
                 created_at=r["created_at"] if r.get("created_at") is not None else datetime.now(timezone.utc),
             )
@@ -1101,8 +1083,6 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
             title_text = Text(truncate(r.title, RECENT_TITLE_MAX))
             if r.is_unassigned and r.status in ("open", "in_progress"):
                 title_text.stylize(f"bold {theme.warn}")
-            elif r.priority == "urgent" and not is_completed:
-                title_text.stylize("bold")
 
             assignee_text = (
                 Text("미배정", style=f"bold {theme.warn}")
