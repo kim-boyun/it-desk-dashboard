@@ -1622,7 +1622,7 @@ def _connect_with_backoff(db_url: str, attempt: int) -> psycopg.Connection:
     if attempt > 1:
         delay = min(30.0, 1.0 * (2 ** (attempt - 1)))
         time.sleep(delay)
-    return psycopg.connect(db_url, connect_timeout=10)
+    return psycopg.connect(db_url, connect_timeout=10, autocommit=True)
 
 
 def run_loop(args: argparse.Namespace) -> int:
