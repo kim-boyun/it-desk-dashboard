@@ -112,6 +112,19 @@ class Theme:
 
 
 THEMES: dict[str, Theme] = {
+    "cyber": Theme(
+        name="cyber",
+        accent="bright_cyan",
+        info="cyan",
+        muted="grey50",
+        ok="bright_green",
+        warn="bright_yellow",
+        danger="bright_red",
+        status_open="bright_yellow",
+        status_in_progress="bright_cyan",
+        status_resolved="bright_green",
+        status_closed="magenta",
+    ),
     "dark": Theme(
         name="dark",
         accent="bright_cyan",
@@ -205,6 +218,12 @@ class TrendPoint:
 
 
 @dataclass
+class HourlyPoint:
+    hour: int
+    count: int
+
+
+@dataclass
 class Alert:
     """상단 경고 영역 항목."""
     level: str  # ok / info / warn / danger
@@ -233,6 +252,7 @@ class DashboardData:
     by_work_type_today: list[WorkTypeToday]
     recent_requests: list[RecentRequest]
     trend_7d: list[TrendPoint]
+    hourly_today: list[HourlyPoint]
     insights: Insights
     refreshed_at: datetime
 
@@ -304,6 +324,7 @@ class DashboardRepository:
         work_type_today = self._fetch_work_type_today()
         recent = self._fetch_recent_requests(recent_limit)
         trend = self._fetch_trend_7d()
+        hourly = self._fetch_hourly_today()
         return DashboardData(
             summary=summary,
             by_assignee_workload=workload,
@@ -311,6 +332,7 @@ class DashboardRepository:
             by_work_type_today=work_type_today,
             recent_requests=recent,
             trend_7d=trend,
+            hourly_today=hourly,
             insights=Insights(),  # compute_insights에서 채움
             refreshed_at=datetime.now(),
         )
@@ -737,6 +759,37 @@ class DashboardRepository:
             rows = cur.fetchall()
         return [TrendPoint(label=str(r["label"]), count=int(r["count"] or 0)) for r in rows]
 
+    def _fetch_hourly_today(self) -> list[HourlyPoint]:
+        """오늘 8시~현재 시각까지 시간대별 신규 요청 건수."""
+        with self.conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                """
+                WITH bounds AS (
+                    SELECT
+                        date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') AS kst_today,
+                        EXTRACT(HOUR FROM now() AT TIME ZONE 'Asia/Seoul')::int AS cur_hour
+                ),
+                hours AS (
+                    SELECT generate_series(8, GREATEST(8, (SELECT cur_hour FROM bounds))) AS h
+                ),
+                counts AS (
+                    SELECT
+                        EXTRACT(HOUR FROM (created_at AT TIME ZONE 'Asia/Seoul'))::int AS h,
+                        COUNT(*)::int AS cnt
+                    FROM tickets
+                    CROSS JOIN bounds b
+                    WHERE (created_at AT TIME ZONE 'Asia/Seoul') >= b.kst_today
+                    GROUP BY 1
+                )
+                SELECT hours.h::int AS h, COALESCE(counts.cnt, 0)::int AS cnt
+                FROM hours
+                LEFT JOIN counts ON counts.h = hours.h
+                ORDER BY hours.h
+                """
+            )
+            rows = cur.fetchall()
+        return [HourlyPoint(hour=int(r["h"]), count=int(r["cnt"] or 0)) for r in rows]
+
 
 # ============================================================================
 # 5) Analytics — 운영 신호 계산
@@ -878,15 +931,6 @@ def _trend_indicator(today: int, yesterday: int, theme: Theme, *, higher_is_bett
 
 # --- 헤더 (배너만, 컨테이너 없음) ---
 
-BANNER_LINES = [
-    " ██╗ ████████╗      ███████╗  ███████╗ ███████╗ ██╗   ██╗",
-    " ██║ ╚══██╔══╝      ██╔═══██╗ ██╔════╝ ██╔════╝ ██║  ██╔╝",
-    " ██║    ██║         ██║   ██║ ███████╗ ███████╗ ██████╔╝ ",
-    " ██║    ██║         ██║   ██║ ██╔════╝ ╚════██║ ██╔══██╗",
-    " ██║    ██║         ███████╔╝ ███████╗ ███████║ ██║   ██╗",
-    " ╚═╝    ╚═╝         ╚══════╝  ╚══════╝ ╚══════╝ ╚═╝   ╚═╝",
-]
-
 
 def render_header(
     theme: Theme,
@@ -902,20 +946,32 @@ def render_header(
         else theme.warn if live_state == "warn"
         else theme.danger
     )
-    dot_text = "***" if live_dot_on else "..."
-    spinner_text = f"{live_spinner}{live_spinner}{live_spinner}"
-    last_ok = last_ok_text or "--:--:--"
+    dot = "●" if live_dot_on else "○"
+    now_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
 
-    left = Text(f"[LIVE {spinner_text}]", style=f"bold {live_color}")
-    center = Text("", style=theme.info)
-    right = Text(f"[RT {dot_text} {last_ok}]", style=f"bold {live_color}")
+    left = Text()
+    left.append("◈ ", style=f"bold {theme.accent}")
+    left.append("IT DESK ", style=f"bold {theme.accent}")
+    left.append("관제센터", style="bold white")
+    if schema_label:
+        left.append(f"  [{schema_label}]", style=theme.muted)
 
-    indicator_row = Table.grid(expand=True)
-    indicator_row.add_column(justify="left", ratio=1)
-    indicator_row.add_column(justify="center", ratio=2)
-    indicator_row.add_column(justify="right", ratio=1)
-    indicator_row.add_row(left, center, right)
-    return indicator_row
+    center = Text(now_str, style=f"bold {theme.accent}", justify="center")
+
+    right = Text(justify="right")
+    right.append("LIVE ", style=f"bold {live_color}")
+    right.append(dot + " ", style=f"bold {live_color}")
+    right.append(live_spinner * 3, style=live_color)
+    if last_ok_text:
+        right.append(f"  갱신 {last_ok_text}", style=theme.muted)
+
+    grid = Table.grid(expand=True)
+    grid.add_column(justify="left", ratio=2)
+    grid.add_column(justify="center", ratio=3)
+    grid.add_column(justify="right", ratio=2)
+    grid.add_row(left, center, right)
+
+    return Panel(grid, box=box.DOUBLE, border_style=theme.accent, padding=(0, 1))
 
 
 # --- KPI 카드 ---
@@ -929,7 +985,7 @@ def _kpi_card(label: str, value: str, sub: RenderableType, accent: str, theme: T
     body = Group(label_t, value_t, Align.center(sub_renderable))
     return Panel(
         Padding(body, (0, 1)),
-        box=box.SQUARE,
+        box=box.DOUBLE,
         border_style=accent,
         padding=(0, 0),
     )
@@ -1007,7 +1063,7 @@ def render_alerts(
     if not insights.alerts and not new_event_message:
         body = Text("✓  특이 신호 없음 — 모든 운영 지표가 정상 범위입니다.", style=theme.ok)
         return Panel(
-            body, box=box.SQUARE, border_style=theme.ok,
+            body, box=box.DOUBLE, border_style=theme.ok,
             title=f"[bold {theme.ok}]상황 신호[/]", title_align="left",
         )
 
@@ -1034,7 +1090,7 @@ def render_alerts(
     overall = theme.danger if any(a.level == "danger" for a in insights.alerts) else theme.warn
     return Panel(
         Group(*lines),
-        box=box.SQUARE, border_style=overall,
+        box=box.DOUBLE, border_style=overall,
         title=f"[bold {overall}]상황 신호 ({len(insights.alerts)})[/]",
         title_align="left",
     )
@@ -1052,28 +1108,15 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
     table.add_column("요청제목", overflow="fold", ratio=4)
     if view.recent_show_category:
         table.add_column("카테고리", overflow="ellipsis", no_wrap=True, min_width=12, ratio=2, style=theme.muted)
-    if view.recent_show_requester:
-        table.add_column("요청자", overflow="fold", ratio=1)
     table.add_column("담당자", overflow="fold", ratio=2)
     table.add_column("상태", justify="center", width=8)
-    if view.recent_show_created:
-        table.add_column("등록", justify="center", width=11, style=theme.muted)
     table.add_column("경과", justify="right", width=10, no_wrap=True)
 
     if not rows:
-        empty = ["-"]
-        empty.append("데이터 없음")
+        empty = ["-", "데이터 없음"]
         if view.recent_show_category:
             empty.append("-")
-        if view.recent_show_requester:
-            empty.append("-")
-        # 담당자, 상태
-        empty.extend(["-", "-"])
-        # 등록(옵션)
-        if view.recent_show_created:
-            empty.append("-")
-        # 경과
-        empty.append("-")
+        empty.extend(["-", "-", "-"])
         table.add_row(*empty)
     else:
         for r in rows:
@@ -1090,7 +1133,6 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
             )
 
             ah = live_age_hours(r.created_at)
-            # 경과 시간 색상 (미해결 상태일 때만 강조)
             age_color = theme.muted
             if r.status in ("open", "in_progress"):
                 if ah >= STALE_THRESHOLD_DAYS * 24:
@@ -1101,15 +1143,11 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
             cells = [Text(f"#{r.id}", style=theme.muted), title_text]
             if view.recent_show_category:
                 cells.append(Text(truncate(r.category, RECENT_CATEGORY_MAX), style=theme.muted))
-            if view.recent_show_requester:
-                cells.append(Text(r.requester))
             cells.extend([
                 assignee_text,
                 Text(STATUS_LABEL.get(r.status, r.status), style=status_color),
+                Text(humanize_age(ah), style=age_color),
             ])
-            if view.recent_show_created:
-                cells.append(Text(r.created_at_kst, style=theme.muted))
-            cells.append(Text(humanize_age(ah), style=age_color))
 
             # 완료/사업검토 건은 dim 처리 → 미처리 행이 시각적으로 도드라짐
             if is_completed:
@@ -1127,10 +1165,13 @@ def render_recent_requests(rows: list[RecentRequest], theme: Theme, compact: boo
                  style=f"bold {theme.warn}" if pending_count > 0 else theme.muted)
     title.append(" · ", style=theme.muted)
     title.append(f"완료 {done_count}", style=theme.muted)
-    return Panel(table, box=box.SQUARE, border_style=theme.muted, title=title, title_align="left")
+    return Panel(table, box=box.DOUBLE, border_style=theme.muted, title=title, title_align="left")
 
 
 # --- 담당자 워크로드 ---
+
+_WORKLOAD_BAR_WIDTH = 10
+
 
 def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme, view: ViewOptions) -> Panel:
     table = Table(
@@ -1140,21 +1181,13 @@ def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme, view: V
     table.add_column("순위", justify="right", width=4, style=theme.muted)
     table.add_column("담당자", overflow="ellipsis", no_wrap=True, ratio=1)
     table.add_column("미처리", justify="right", width=6)
-    table.add_column("오늘", justify="right", width=6)
-    if view.workload_show_week:
-        table.add_column("이번주", justify="right", width=7)
-    if view.workload_show_total:
-        table.add_column("총", justify="right", width=6)
+    table.add_column("오늘완료", justify="right", width=8)
+    table.add_column("부하", no_wrap=True, min_width=_WORKLOAD_BAR_WIDTH + 2)
 
     if not rows:
-        empty = ["-", "데이터 없음", "0", "0"]
-        if view.workload_show_week:
-            empty.append("0")
-        if view.workload_show_total:
-            empty.append("0")
-        table.add_row(*empty)
+        table.add_row("-", "데이터 없음", "0", "0", "")
         return Panel(
-            table, box=box.SQUARE, border_style=theme.muted,
+            table, box=box.DOUBLE, border_style=theme.muted,
             title=f"[bold {theme.accent}]담당자 워크로드[/]", title_align="left",
         )
     max_pending = max((w.pending_count for w in rows), default=1)
@@ -1179,20 +1212,22 @@ def render_assignee_workload(rows: list[AssigneeWorkload], theme: Theme, view: V
                 pending_color = theme.muted
 
         done_color = theme.ok if w.done_today_count > 0 else theme.muted
+        bar_len = round(w.pending_count / max_pending * _WORKLOAD_BAR_WIDTH) if max_pending > 0 else 0
+        bar = Text()
+        bar.append("█" * bar_len, style=f"bold {pending_color}")
+        bar.append("░" * (_WORKLOAD_BAR_WIDTH - bar_len), style=theme.muted)
+
         cells = [
             rank_label,
             assignee_text,
             Text(str(w.pending_count), style=f"bold {pending_color}"),
             Text(str(w.done_today_count), style=done_color),
+            bar,
         ]
-        if view.workload_show_week:
-            cells.append(Text(str(w.done_week_count), style=theme.info if w.done_week_count > 0 else theme.muted))
-        if view.workload_show_total:
-            cells.append(Text(str(w.done_total_count), style=theme.info if w.done_total_count > 0 else theme.muted))
         table.add_row(*cells)
 
     return Panel(
-        table, box=box.SQUARE, border_style=theme.muted,
+        table, box=box.DOUBLE, border_style=theme.muted,
         title=f"[bold {theme.accent}]담당자 워크로드[/]", title_align="left",
     )
 
@@ -1328,8 +1363,124 @@ def render_trend(rows: list[TrendPoint], theme: Theme) -> Panel:
         grid,
     )
     return Panel(
-        body, box=box.SQUARE, border_style=theme.muted,
+        body, box=box.DOUBLE, border_style=theme.muted,
         title=f"[bold {theme.accent}]최근 5일 신규 추세[/]", title_align="left",
+    )
+
+
+def render_hourly_today(rows: list[HourlyPoint], theme: Theme) -> Panel:
+    if not rows:
+        return Panel(
+            Text("데이터 없음", style=theme.muted),
+            box=box.DOUBLE, border_style=theme.muted,
+            title=f"[bold {theme.accent}]시간대별 오늘 요청[/]", title_align="left",
+        )
+    counts = [r.count for r in rows]
+    max_count = max(counts) if counts else 0
+    total = sum(counts)
+    peak_idx = counts.index(max_count) if max_count > 0 else -1
+
+    grid = Table(
+        box=None, expand=True, show_edge=False, pad_edge=False,
+        show_header=False, padding=(0, 1),
+    )
+    for _ in rows:
+        grid.add_column(justify="center")
+
+    cells: list[Text] = []
+    for i, r in enumerate(rows):
+        is_current = i == len(rows) - 1
+        is_peak = i == peak_idx and max_count > 0
+        if r.count == 0:
+            style = theme.muted
+        elif is_peak:
+            style = f"bold {theme.warn}"
+        elif is_current:
+            style = f"bold {theme.accent}"
+        else:
+            style = theme.info
+        bar = _spark_bar(r.count, max_count)
+        cell = Text(justify="center")
+        cell.append(f"{bar}\n", style=style)
+        cell.append(f"{r.count}\n", style=style if r.count > 0 else theme.muted)
+        cell.append(f"{r.hour:02d}", style=theme.muted)
+        cells.append(cell)
+    grid.add_row(*cells)
+
+    summary = Text(justify="center")
+    summary.append("오늘 총 ", style=theme.muted)
+    summary.append(f"{total}건", style=f"bold {theme.accent}")
+    if peak_idx >= 0:
+        summary.append("  피크 ", style=theme.muted)
+        summary.append(f"{rows[peak_idx].hour:02d}시 ({max_count}건)", style=f"bold {theme.warn}")
+
+    body = Group(
+        Align.center(summary),
+        Rule(style=theme.muted),
+        grid,
+    )
+    return Panel(
+        body, box=box.DOUBLE, border_style=theme.muted,
+        title=f"[bold {theme.accent}]시간대별 오늘 요청[/]", title_align="left",
+    )
+
+
+# --- 운영 지표 요약 ---
+
+def render_ops_summary(data: DashboardData, theme: Theme) -> Panel:
+    s = data.summary
+    ins = data.insights
+
+    avg_val = humanize_age(s.avg_resolution_hours) if s.avg_resolution_hours is not None else "—"
+    avg_color = (
+        theme.ok if s.avg_resolution_hours is not None and s.avg_resolution_hours < 24
+        else theme.warn if s.avg_resolution_hours is not None and s.avg_resolution_hours < 72
+        else theme.danger if s.avg_resolution_hours is not None
+        else theme.muted
+    )
+    stale_color = theme.warn if s.stale_open > 0 else theme.ok
+    long_color = theme.danger if s.long_pending > 0 else theme.ok
+    backlog_color = theme.severity_color(ins.backlog_severity)
+    pending_color = theme.warn if s.pending_tickets > 10 else theme.info
+
+    throughput_val = f"{ins.throughput_pct:.0f}%" if ins.throughput_pct is not None else "—"
+    throughput_color = (
+        theme.ok if ins.throughput_pct is not None and ins.throughput_pct >= 80
+        else theme.warn if ins.throughput_pct is not None and ins.throughput_pct >= 40
+        else theme.danger if ins.throughput_pct is not None
+        else theme.muted
+    )
+
+    def _stat(label: str, value: str, val_color: str) -> Text:
+        t = Text(justify="center")
+        t.append(f"{label}\n", style=theme.muted)
+        t.append(value, style=f"bold {val_color}")
+        return t
+
+    row1 = Table.grid(expand=True)
+    row1.add_column(ratio=1, justify="center")
+    row1.add_column(ratio=1, justify="center")
+    row1.add_column(ratio=1, justify="center")
+    row1.add_row(
+        _stat("평균 처리 시간", avg_val, avg_color),
+        _stat(f"노후({STALE_THRESHOLD_DAYS}일↑)", f"{s.stale_open}건", stale_color),
+        _stat("장기미처리(7일↑)", f"{s.long_pending}건", long_color),
+    )
+
+    row2 = Table.grid(expand=True)
+    row2.add_column(ratio=1, justify="center")
+    row2.add_column(ratio=1, justify="center")
+    row2.add_column(ratio=1, justify="center")
+    row2.add_row(
+        _stat("백로그 등급", ins.backlog_level, backlog_color),
+        _stat("총 미처리", f"{s.pending_tickets}건", pending_color),
+        _stat("오늘 처리율", throughput_val, throughput_color),
+    )
+
+    body = Group(row1, Rule(style=theme.muted), row2)
+    return Panel(
+        body, box=box.DOUBLE, border_style=theme.muted,
+        title=f"[bold {theme.accent}]운영 지표[/]", title_align="left",
     )
 
 
@@ -1403,10 +1554,9 @@ def build_layout(
     last_ok_text: str | None = None,
 ) -> Layout:
     root = Layout(name="root")
-    header_size = 1
+    header_size = 3
     kpi_size = 5
     alert_size = max(3, min(8, 2 + max(0, len(data.insights.alerts))))
-    footer_size = 0
     outer_margin = 2 if compact else 3
     gap = 1
 
@@ -1433,19 +1583,11 @@ def build_layout(
     root["v_gap_2"].update(Text(""))
     root["v_gap_3"].update(Text(""))
 
-    # 본문: 좌측(요청현황 + 작업유형/카테고리), 우측(5일 추세/워크로드) 구조
-    workload_rows = len(data.by_assignee_workload)
-    category_rows = len(data.by_category_today)
-    work_type_rows = len(data.by_work_type_today)
-    # 요청현황은 행 수만큼만 채워 공간을 줄이고, 작업유형·카테고리 전체 행 표시에 넘김
-    recent_size = max(8, len(data.recent_requests) + RECENT_PANEL_OVERHEAD)
-    bottom_panel_chrome = 4
-    category_size = max(6, category_rows + bottom_panel_chrome)
-    work_type_size = max(6, work_type_rows + bottom_panel_chrome)
-    left_bottom_size = max(category_size, work_type_size)
-    workload_size = max(6, workload_rows + WORKLOAD_PANEL_OVERHEAD)
+    # 본문: 좌측(요청현황 전체), 우측(추세/워크로드)
+    workload_size = max(6, len(data.by_assignee_workload) + WORKLOAD_PANEL_OVERHEAD)
 
-    # 본문 좌/우 폭. 우측 컬럼(추세/워크로드)은 동일 너비로 유지
+    hourly_size = 7  # 상단 테두리 + 요약 + 구분선 + sparkline 3행 + 하단 테두리
+
     root["body"].split_row(
         Layout(name="left_main", ratio=5),
         Layout(name="h_gap", size=gap),
@@ -1453,32 +1595,27 @@ def build_layout(
     )
     root["h_gap"].update(Text(""))
 
-    # 좌측: 최근 요청 + 하단(작업유형/카테고리)
-    left_gap_size = 0 if compact else 0
+    # 좌측: 요청 현황(비율) + 시간대별 차트(고정)
     root["left_main"].split_column(
-        Layout(name="recent", size=recent_size),
-        Layout(name="left_gap", size=left_gap_size),
-        Layout(name="left_bottom", size=left_bottom_size),
-        Layout(name="left_spacer", ratio=1),
+        Layout(name="recent", ratio=1),
+        Layout(name="left_v_gap", size=gap),
+        Layout(name="hourly", size=hourly_size),
     )
-    root["left_gap"].update(Text(""))
-    root["left_spacer"].update(Text(""))
-    bottom_gap = 1 if compact else 2
-    root["left_bottom"].split_row(
-        Layout(name="work_type", ratio=1),
-        Layout(name="left_bottom_gap", size=bottom_gap),
-        Layout(name="category", ratio=1),
-    )
-    root["left_bottom_gap"].update(Text(""))
+    root["left_v_gap"].update(Text(""))
 
-    # 우측: 최근 5일 신규 추세 / 담당자 워크로드(행 수에 맞춘 고정 높이, 나머지는 spacer)
+    ops_summary_size = 7  # 테두리(2) + 지표행1(2) + 구분선(1) + 지표행2(2)
+
+    # 우측: 최근 5일 신규 추세 / 담당자 워크로드 / 운영 지표 요약
     root["right_main"].split_column(
         Layout(name="trend", size=8),
         Layout(name="right_gap_1", size=gap),
         Layout(name="workload", size=workload_size),
+        Layout(name="right_gap_2", size=gap),
+        Layout(name="ops_summary", size=ops_summary_size),
         Layout(name="right_spacer", ratio=1),
     )
     root["right_gap_1"].update(Text(""))
+    root["right_gap_2"].update(Text(""))
     root["right_spacer"].update(Text(""))
 
     root["header"].update(render_header(
@@ -1500,10 +1637,10 @@ def build_layout(
         new_event_message = f"신규 요청 +{new_alert_delta}건 유입{when}"
     root["alert"].update(render_alerts(data.insights, theme, new_event_message=new_event_message))
     root["recent"].update(render_recent_requests(data.recent_requests, theme, compact, view))
+    root["hourly"].update(render_hourly_today(data.hourly_today, theme))
     root["workload"].update(Padding(render_assignee_workload(data.by_assignee_workload, theme, view), (0, 1)))
     root["trend"].update(Padding(render_trend(data.trend_7d, theme), (0, 1)))
-    root["category"].update(render_category_today(data.by_category_today, theme, view))
-    root["work_type"].update(render_work_type_today(data.by_work_type_today, theme, view))
+    root["ops_summary"].update(Padding(render_ops_summary(data, theme), (0, 1)))
     return root
 
 
@@ -1825,7 +1962,7 @@ def parse_args() -> argparse.Namespace:
         help="최근 요청 표시 개수 (1~100)",
     )
     parser.add_argument(
-        "--theme", choices=sorted(THEMES.keys()), default="dark",
+        "--theme", choices=sorted(THEMES.keys()), default="cyber",
         help="컬러 테마",
     )
     parser.add_argument(
